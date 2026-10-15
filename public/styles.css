@@ -247,6 +247,8 @@ tr.me { background: rgba(70, 65, 217, 0.16); }
 
 .side { display: grid; gap: 12px; }
 
+#lanes:empty { display: none; }
+
 .side section { padding: 14px; }
 
 .side h2 { margin: 0 0 8px; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
