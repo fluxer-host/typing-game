@@ -23,8 +23,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "typing-game",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_name": "fluxer-typing-game",
+      "database_id": "b4ddb18c-6844-489a-80fb-90c9eb982c61",
       "migrations_dir": "migrations"
     }
   ],
