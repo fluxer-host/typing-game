@@ -258,6 +258,7 @@ function lobbyView() {
       class: `mode${state.mode === id ? " selected" : ""}`,
       type: "button",
       "data-mode": id,
+      "aria-pressed": state.mode === id ? "true" : "false",
       onclick: () => chooseMode(id),
     });
     card.append(h("strong", { text: info.title }));
@@ -529,7 +530,16 @@ function formatDelta(value) {
   return String(value);
 }
 
+function paintModes() {
+  for (const button of document.querySelectorAll(".mode[data-mode]")) {
+    const on = button.dataset.mode === state.mode;
+    button.classList.toggle("selected", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
 function paintDynamic() {
+  if (state.shell === "lobby") paintModes();
   if (state.shell === "queue") {
     const copy = document.getElementById("queue-copy");
     if (copy) copy.textContent = queueCopy();
@@ -730,8 +740,10 @@ function paintLanes() {
 
 function chooseMode(mode) {
   if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (!MODES[mode]) return;
   state.mode = mode;
   localStorage.setItem("tg_mode", mode);
+  paintModes();
   loadBoard().then(() => ensure());
 }
 
