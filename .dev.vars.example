@@ -1,5 +1,7 @@
 # Copy to .dev.vars for local `wrangler dev`. This file is not deployed.
-# Generate a long random SESSION_SECRET. Do not reuse the example value.
+# SESSION_SECRET is not a Fluxer credential. Generate one with:
+#   openssl rand -base64 32
+# Paste that output below. Do not reuse this placeholder.
 SESSION_SECRET=replace-with-a-long-random-string
 ALLOW_DEV_LOGIN=true
 

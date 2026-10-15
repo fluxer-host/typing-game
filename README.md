@@ -77,10 +77,13 @@ Secrets:
 ```bash
 npx wrangler secret put FLUXER_CLIENT_ID
 npx wrangler secret put FLUXER_CLIENT_SECRET
+openssl rand -base64 32
 npx wrangler secret put SESSION_SECRET
 ```
 
-`SESSION_SECRET` should be a long random string. Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://typing.fluxer.my/auth/callback`. Leave it unset and the callback follows the host in the address bar.
+`FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET` come from the Fluxer application. `SESSION_SECRET` does not. Run `openssl rand -base64 32`, then paste that output when `wrangler secret put SESSION_SECRET` prompts. It signs the login cookie. The Fluxer bot token is not used.
+
+Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://typing.fluxer.my/auth/callback`. Leave it unset and the callback follows the host in the address bar.
 
 ```bash
 npm run deploy
