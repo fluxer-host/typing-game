@@ -32,5 +32,6 @@
     "FLUXER_API": "https://api.fluxer.app",
     "MEDIA_BASE": "https://fluxerusercontent.com",
     "STATIC_CDN": "https://fluxerstatic.com"
-  }
+  },
+  "routes": [{ "pattern": "typing.fluxer.my", "custom_domain": true }]
 }
