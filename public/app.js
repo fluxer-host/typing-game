@@ -73,6 +73,8 @@ const state = {
   room: null,
   queue: null,
   rematch: null,
+  rooms: [],
+  roomMax: 6,
   shift: false,
   shell: "",
 };
@@ -145,6 +147,7 @@ function shellName() {
   if (state.phase === "countdown" || state.phase === "race" || state.phase === "finishing") return "race";
   if (state.phase === "queue") return "queue";
   if (state.phase === "room") return "room";
+  if (state.phase === "browse") return "browse";
   return "lobby";
 }
 
@@ -207,6 +210,7 @@ function paintShell() {
   else if (state.shell === "lobby") stage.append(lobbyView());
   else if (state.shell === "queue") stage.append(queueView());
   else if (state.shell === "room") stage.append(roomView());
+  else if (state.shell === "browse") stage.append(browseView());
   else if (state.shell === "race") stage.append(raceView());
   else if (state.shell === "results") stage.append(resultsView());
 }
@@ -255,7 +259,7 @@ function authView() {
 function lobbyView() {
   const box = h("div", {});
   box.append(h("h1", { class: "lead", text: "Pick a ladder" }));
-  box.append(h("p", { class: "muted", text: "Queue for a live room, practice alone, or share a 4-character code." }));
+  box.append(h("p", { class: "muted", text: "Queue for a live room, practice alone, or join an open room." }));
   const modes = h("div", { class: "modes" });
   for (const [id, info] of Object.entries(MODES)) {
     const elo = state.me?.elo?.[id];
@@ -293,6 +297,7 @@ function lobbyView() {
     h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => sendLobby({ t: "queue", ...play() }) }),
     h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => sendLobby({ t: "practice", ...play() }) }),
     h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => sendLobby({ t: "room_create", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "browse", text: "Open rooms", onclick: openBrowse }),
   );
   box.append(actions);
   const join = h("form", { class: "join" });
@@ -336,10 +341,10 @@ function queueCopy() {
 function roomView() {
   const room = state.room;
   const box = h("div", {});
-  box.append(h("h1", { class: "lead", text: "Private room" }));
+  box.append(h("h1", { class: "lead", text: "Room" }));
   box.append(h("div", { class: "code", id: "room-code-label", text: room?.code || "" }));
   const roomLength = lengthInfo(state.length)?.title || "Sprint";
-  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength}. Share the code or the link.` }));
+  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength}. Listed in Open rooms until the host starts.` }));
   const list = h("ul", { class: "room-list", id: "room-players" });
   box.append(list);
   const actions = h("div", { class: "actions" });
@@ -380,6 +385,74 @@ function roomView() {
   }));
   box.append(actions);
   return box;
+}
+
+function openBrowse() {
+  state.phase = "browse";
+  state.rooms = [];
+  ensure();
+  sendLobby({ t: "browse" });
+}
+
+function browseView() {
+  const box = h("div", {});
+  box.append(h("h1", { class: "lead", text: "Open rooms" }));
+  box.append(h("p", { class: "muted", text: "Rooms waiting for a host to start. The list shows who is inside and how many seats are left." }));
+  box.append(h("div", { id: "room-directory", class: "room-directory" }));
+  box.append(h("div", { class: "actions" }, [
+    h("button", {
+      class: "btn",
+      type: "button",
+      "data-action": "browse-lobby",
+      text: "Lobby",
+      onclick: () => {
+        sendLobby({ t: "browse_stop" });
+        state.phase = "lobby";
+        ensure();
+      },
+    }),
+  ]));
+  return box;
+}
+
+function paintRooms() {
+  const root = document.getElementById("room-directory");
+  if (!root) return;
+  root.replaceChildren();
+  const rooms = state.rooms || [];
+  if (!rooms.length) {
+    root.append(h("p", { class: "empty", text: "No open rooms right now." }));
+    return;
+  }
+  const max = state.roomMax || 6;
+  for (const room of rooms) {
+    const count = room.players?.length || 0;
+    const card = h("article", { class: "room-card" });
+    const head = h("div", { class: "room-card-top" });
+    head.append(h("strong", { class: "room-code", text: room.code || "" }));
+    head.append(h("span", { class: "room-count", text: `${count} of ${max}` }));
+    card.append(head);
+    const modeTitle = MODES[room.mode]?.title || "Desktop";
+    const lengthTitle = lengthInfo(room.length)?.title || "Sprint";
+    card.append(h("p", { class: "muted", text: `${modeTitle} · ${lengthTitle}` }));
+    const list = h("ul", { class: "room-list" });
+    for (const player of room.players || []) {
+      const item = h("li", {});
+      item.append(avatarNode(player), document.createTextNode(` ${player.name}${player.host ? " · host" : ""}`));
+      list.append(item);
+    }
+    card.append(list);
+    const full = count >= max;
+    card.append(h("button", {
+      class: "btn primary",
+      type: "button",
+      text: full ? "Full" : "Join",
+      disabled: full,
+      "data-code": room.code,
+      onclick: () => sendLobby({ t: "room_join", code: room.code }),
+    }));
+    root.append(card);
+  }
 }
 
 function raceView() {
@@ -642,6 +715,7 @@ function paintDynamic() {
     if (copy) copy.textContent = queueCopy();
   }
   if (state.shell === "room") paintRoom();
+  if (state.shell === "browse") paintRooms();
   if (state.shell === "results") paintRematch();
   if (state.shell === "race") {
     paintPassage();
@@ -866,7 +940,7 @@ function openLobby() {
   lobby = new WebSocket(socketUrl());
   lobby.addEventListener("message", (event) => onLobby(event));
   lobby.addEventListener("close", () => {
-    if (state.phase === "queue") toast("Lobby connection closed.");
+    if (state.phase === "queue" || state.phase === "browse") toast("Lobby connection closed.");
   });
 }
 
@@ -904,6 +978,12 @@ function onLobby(event) {
     return;
   }
   if (msg.t === "match") startMatch(msg);
+  if (msg.t === "rooms") {
+    state.rooms = msg.rooms || [];
+    if (msg.max) state.roomMax = msg.max;
+    if (state.shell === "browse") paintRooms();
+    return;
+  }
   if (msg.t === "rematch") {
     if (msg.raceId !== state.raceId || state.phase !== "results") return;
     state.rematch = msg;

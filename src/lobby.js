@@ -8,7 +8,42 @@ import { pickPassage } from "./sentences.js";
 
 const GATHER_MS = 1500;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const ROOM_LIMIT = 6;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export function summarizeRooms(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    if (entry.status !== "room" || typeof entry.room !== "string" || !entry.room) continue;
+    if (!groups.has(entry.room)) groups.set(entry.room, []);
+    groups.get(entry.room).push(entry);
+  }
+  const rooms = [];
+  for (const [code, members] of groups) {
+    const host = members.find((entry) => entry.host) || members[0];
+    const openedAt = members.reduce((min, entry) => {
+      const value = Number(entry.openedAt) || 0;
+      if (!value) return min;
+      return min ? Math.min(min, value) : value;
+    }, 0);
+    rooms.push({
+      code,
+      mode: host.mode,
+      length: readLength(host.length),
+      openedAt,
+      players: members.map((entry) => ({
+        id: entry.user?.id,
+        name: entry.user?.name || "Racer",
+        tag: entry.user?.tag || "",
+        avatar: entry.user?.avatar || null,
+        color: entry.user?.color ?? null,
+        host: Boolean(entry.host),
+      })),
+    });
+  }
+  rooms.sort((a, b) => b.players.length - a.players.length || b.openedAt - a.openedAt || a.code.localeCompare(b.code));
+  return rooms;
+}
 
 function readLength(value) {
   return isLength(value) ? value : "sprint";
@@ -117,24 +152,46 @@ export class Lobby {
     }
   }
 
+  directory() {
+    return summarizeRooms(this.sockets().map((entry) => ({
+      status: entry.att.status,
+      room: entry.att.room,
+      host: entry.att.host,
+      mode: entry.att.mode,
+      length: entry.att.length,
+      openedAt: entry.att.openedAt,
+      user: entry.att.user,
+    })));
+  }
+
+  emitDirectory() {
+    const payload = { t: "rooms", max: ROOM_LIMIT, rooms: this.directory() };
+    for (const entry of this.sockets()) {
+      if (!entry.att.watching) continue;
+      this.send(entry.ws, payload);
+    }
+  }
+
   emitRoom(code) {
     const members = this.roomMembers(code);
-    if (!members.length) return;
-    if (!members.some((entry) => entry.att.host)) {
-      members[0].att.host = true;
-      members[0].ws.serializeAttachment(members[0].att);
+    if (members.length) {
+      if (!members.some((entry) => entry.att.host)) {
+        members[0].att.host = true;
+        members[0].ws.serializeAttachment(members[0].att);
+      }
+      const players = members.map((entry) => ({ ...entry.att.user, host: Boolean(entry.att.host) }));
+      for (const entry of members) {
+        this.send(entry.ws, {
+          t: "room",
+          code,
+          mode: entry.att.mode,
+          length: readLength(entry.att.length),
+          youHost: Boolean(entry.att.host),
+          players,
+        });
+      }
     }
-    const players = members.map((entry) => ({ ...entry.att.user, host: Boolean(entry.att.host) }));
-    for (const entry of members) {
-      this.send(entry.ws, {
-        t: "room",
-        code,
-        mode: entry.att.mode,
-        length: readLength(entry.att.length),
-        youHost: Boolean(entry.att.host),
-        players,
-      });
-    }
+    this.emitDirectory();
   }
 
   async fetch(request) {
@@ -175,6 +232,26 @@ export class Lobby {
     if (!msg || typeof msg.t !== "string") return;
     const att = ws.deserializeAttachment() || {};
     if (!att.user) return;
+
+    if (msg.t === "browse") {
+      att.watching = true;
+      ws.serializeAttachment(att);
+      this.send(ws, { t: "rooms", max: ROOM_LIMIT, rooms: this.directory() });
+      return;
+    }
+
+    if (msg.t === "browse_stop") {
+      if (att.watching) {
+        att.watching = false;
+        ws.serializeAttachment(att);
+      }
+      return;
+    }
+
+    if (att.watching) {
+      att.watching = false;
+      ws.serializeAttachment(att);
+    }
 
     if (msg.t === "queue") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
@@ -249,6 +326,7 @@ export class Lobby {
       att.length = readLength(msg.length);
       att.room = code;
       att.host = true;
+      att.openedAt = Date.now();
       ws.serializeAttachment(att);
       if (previousRoom && previousRoom !== code) this.emitRoom(previousRoom);
       this.emitRoom(code);
@@ -260,7 +338,7 @@ export class Lobby {
       if (code.length !== 4) return this.send(ws, { t: "error", error: "Room codes are 4 characters." });
       const members = this.roomMembers(code);
       if (!members.length) return this.send(ws, { t: "error", error: "That room is not open." });
-      if (members.length >= 6) return this.send(ws, { t: "error", error: "That room is full." });
+      if (members.length >= ROOM_LIMIT) return this.send(ws, { t: "error", error: "That room is full." });
       await this.releaseGroup(ws, att);
       const host = members.find((entry) => entry.att.host) || members[0];
       const previousRoom = att.status === "room" ? att.room : null;
@@ -269,6 +347,7 @@ export class Lobby {
       att.length = readLength(host.att.length);
       att.room = code;
       att.host = false;
+      att.openedAt = host.att.openedAt || Date.now();
       ws.serializeAttachment(att);
       if (previousRoom && previousRoom !== code) this.emitRoom(previousRoom);
       this.emitRoom(code);
@@ -393,6 +472,7 @@ export class Lobby {
         this.send(entry.ws, match);
       }
       this.announce(mode, lane);
+      this.emitDirectory();
       return true;
     } catch (error) {
       console.error("launch failed", error);

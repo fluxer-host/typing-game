@@ -16,7 +16,7 @@ Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer
 
 1. Sign in with Fluxer OAuth (`identify` scope, authorization code, PKCE `S256`).
 2. Pick a ladder: Desktop, Mobile, or Cursor.
-3. Queue, practice alone, or share a 4-character room.
+3. Queue, practice alone, or join an open room. Open rooms lists who is waiting and how many seats are left. A 4-character code still joins a room directly.
 4. The lobby Durable Object gives the whole room one passage and one start time. A sprint is one sentence, a set is three, and a long race is five. The queue only pairs racers who picked the same ladder and the same length.
 5. A race Durable Object watches progress. The first completed passage it receives is first place. The race ends when everyone has finished, or when the clock runs out: 2 minutes, 4 minutes, or 6 minutes. Rematch keeps the same ladder and length. A practice rematch starts at once. A rated rematch starts when two or more people from that race click Rematch, on a new passage.
 6. Rated matches update that ladder's Elo. Practice does not.

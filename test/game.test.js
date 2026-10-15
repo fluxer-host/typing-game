@@ -7,6 +7,7 @@ import { buildResults } from "../src/results.js";
 import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
 import { LENGTHS, lengthList } from "../src/lengths.js";
+import { summarizeRooms } from "../src/lobby.js";
 import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
 
 test("sentences stay on the shared keyboard", () => {
@@ -40,6 +41,23 @@ test("a passage is one, three, or five known sentences", () => {
   const joined = ["I love Fluxer", "Flux means change.", "Chat is motion."].join(" ");
   assert.equal(passageOk("cursor", 3, joined), true);
   assert.equal(passageOk("cursor", 1, joined), false);
+});
+
+test("the open room list counts racers who are still waiting", () => {
+  const rooms = summarizeRooms([
+    { status: "room", room: "ABCD", host: true, mode: "desktop", length: "sprint", openedAt: 10, user: { id: "a", name: "Ada", tag: "Ada", elo: { desktop: 1000 } } },
+    { status: "room", room: "WXYZ", host: true, mode: "cursor", length: "long", openedAt: 20, user: { id: "c", name: "Cam", tag: "Cam" } },
+    { status: "room", room: "WXYZ", host: false, mode: "cursor", length: "long", openedAt: 20, user: { id: "d", name: "Dee", tag: "Dee" } },
+    { status: "matched", room: "WXYZ", host: false, mode: "cursor", length: "long", openedAt: 20, user: { id: "e", name: "Eve" } },
+    { status: "queue", room: null, mode: "desktop", length: "sprint", user: { id: "b", name: "Bea" } },
+  ]);
+  assert.equal(rooms.map((room) => room.code).join(","), "WXYZ,ABCD");
+  assert.equal(rooms[0].players.length, 2);
+  assert.equal(rooms[0].mode, "cursor");
+  assert.equal(rooms[0].length, "long");
+  assert.equal(rooms[0].players.find((player) => player.host).name, "Cam");
+  assert.equal(rooms[1].players[0].name, "Ada");
+  assert.equal(Object.hasOwn(rooms[0].players[0], "elo"), false);
 });
 
 test("the cursor keyboard in the page covers every cursor key", () => {

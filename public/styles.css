@@ -149,6 +149,30 @@ button { cursor: pointer; }
 
 .room-list li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 
+.room-directory { display: grid; gap: 12px; }
+
+.room-card {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.room-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.room-code {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  letter-spacing: 0.14em;
+}
+
+.room-count { color: var(--muted); }
+
 .rematch-note { margin: 0 0 12px; }
 
 .rematch-note[hidden] { display: none; }

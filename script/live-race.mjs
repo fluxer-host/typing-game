@@ -189,6 +189,28 @@ const after = await (await fetch(`${base}/api/me`, { headers: { cookie: `tg_sess
 assert(after.user.elo.desktop === 984, "practice wrote desktop elo");
 assert(after.user.best.cursor > 0, "practice should record a cursor best");
 
+adaWs.send(JSON.stringify({ t: "room_create", mode: "desktop", length: "set" }));
+const adaRoom = await adaTrack.next((msg) => msg.t === "room" && msg.youHost === true);
+assert(adaRoom.players.length === 1, "host missing from the new room");
+const cam = await login("Cam");
+const camLobby = await openSocket(`${wsBase}/ws?t=${encodeURIComponent(cam.token)}`);
+camLobby.ws.send(JSON.stringify({ t: "browse" }));
+const listed = await camLobby.tracker.next((msg) => msg.t === "rooms" && msg.rooms.some((room) => room.code === adaRoom.code));
+const listedRoom = listed.rooms.find((room) => room.code === adaRoom.code);
+assert(listed.max === 6, "room max");
+assert(listedRoom.mode === "desktop" && listedRoom.length === "set", "listed format");
+assert(listedRoom.players.length === 1 && listedRoom.players[0].name === "Ada" && listedRoom.players[0].host === true, "listed host");
+beaSocket.send(JSON.stringify({ t: "room_join", code: adaRoom.code }));
+const joined = await camLobby.tracker.next((msg) => msg.t === "rooms" && msg.rooms.some((room) => room.code === adaRoom.code && room.players.length === 2));
+const joinedRoom = joined.rooms.find((room) => room.code === adaRoom.code);
+assert(joinedRoom.players.map((player) => player.name).sort().join(",") === "Ada,Bea", "join did not update the list");
+beaSocket.send(JSON.stringify({ t: "leave" }));
+await camLobby.tracker.next((msg) => msg.t === "rooms" && msg.rooms.some((room) => room.code === adaRoom.code && room.players.length === 1));
+adaWs.send(JSON.stringify({ t: "leave" }));
+const cleared = await camLobby.tracker.next((msg) => msg.t === "rooms" && !msg.rooms.some((room) => room.code === adaRoom.code));
+assert(cleared.t === "rooms", "room left the list");
+camLobby.ws.close();
+
 adaWs.close();
 beaSocket.close();
 adaRaceWs.close();
