@@ -149,6 +149,12 @@ button { cursor: pointer; }
 
 .room-list li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 
+.rematch-note { margin: 0 0 12px; }
+
+.rematch-note[hidden] { display: none; }
+
+.result-actions { flex-wrap: wrap; }
+
 .race-top, .result-actions, .actions, .account, .join, .dev {
   display: flex;
   align-items: center;

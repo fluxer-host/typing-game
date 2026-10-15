@@ -72,6 +72,7 @@ const state = {
   results: null,
   room: null,
   queue: null,
+  rematch: null,
   shift: false,
   shell: "",
 };
@@ -516,14 +517,76 @@ function resultsView() {
     box.append(h("p", { class: "quote", text: state.results?.sentence || state.sentence }));
     box.append(resultTable());
   }
+  box.append(h("p", { id: "rematch-note", class: "hint rematch-note", hidden: true }));
   const actions = h("div", { class: "result-actions" });
   actions.append(
-    h("button", { class: "btn primary", type: "button", text: "Queue again", onclick: () => { leaveRace(); sendLobby({ t: "queue", mode: state.mode, length: state.length }); } }),
+    h("button", { id: "rematch-btn", class: "btn primary", type: "button", "data-action": "rematch", text: "Rematch", onclick: askRematch }),
+    h("button", { class: "btn", type: "button", text: "Queue again", onclick: () => { leaveRace(); sendLobby({ t: "queue", mode: state.mode, length: state.length }); } }),
     h("button", { class: "btn", type: "button", text: "Practice", onclick: () => { leaveRace(); sendLobby({ t: "practice", mode: state.mode, length: state.length }); } }),
-    h("button", { class: "btn ghost", type: "button", text: "Lobby", onclick: () => leaveRace() }),
+    h("button", { class: "btn ghost", type: "button", text: "Lobby", onclick: () => { sendLobby({ t: "leave" }); leaveRace(); } }),
   );
   box.append(actions);
   return box;
+}
+
+function rematchNames(ids) {
+  const rows = state.results?.rows || [];
+  const players = state.players || [];
+  return ids.map((id) => (
+    rows.find((row) => row.id === id)?.name
+    || players.find((row) => row.id === id)?.name
+    || "A racer"
+  ));
+}
+
+function paintRematch() {
+  const note = document.getElementById("rematch-note");
+  const button = document.getElementById("rematch-btn");
+  if (!note || !button) return;
+  const offer = state.rematch;
+  const mine = Boolean(state.me && offer?.ready?.includes(state.me.id));
+  button.textContent = mine ? "Cancel rematch" : "Rematch";
+  if (!offer || offer.raceId !== state.raceId) {
+    note.hidden = true;
+    return;
+  }
+  const others = rematchNames((offer.ready || []).filter((id) => id !== state.me?.id));
+  if (mine) {
+    note.hidden = false;
+    note.textContent = "Waiting for a rematch.";
+    return;
+  }
+  if (others.length === 1) {
+    note.hidden = false;
+    note.textContent = `${others[0]} wants a rematch.`;
+    return;
+  }
+  if (others.length > 1) {
+    note.hidden = false;
+    note.textContent = `${others.slice(0, -1).join(", ")} and ${others[others.length - 1]} want a rematch.`;
+    return;
+  }
+  if (offer.started) {
+    note.hidden = false;
+    note.textContent = "A rematch already started.";
+    return;
+  }
+  note.hidden = true;
+}
+
+function askRematch() {
+  const offer = state.rematch;
+  const mine = Boolean(state.me && offer?.ready?.includes(state.me.id));
+  if (mine) {
+    sendLobby({ t: "rematch_cancel" });
+    return;
+  }
+  const solo = !state.ranked || (state.players || []).length < 2;
+  if (solo) {
+    sendLobby({ t: "practice", mode: state.mode, length: state.length });
+    return;
+  }
+  sendLobby({ t: "rematch", raceId: state.raceId });
 }
 
 function resultTable() {
@@ -579,6 +642,7 @@ function paintDynamic() {
     if (copy) copy.textContent = queueCopy();
   }
   if (state.shell === "room") paintRoom();
+  if (state.shell === "results") paintRematch();
   if (state.shell === "race") {
     paintPassage();
     paintStats();
@@ -840,6 +904,11 @@ function onLobby(event) {
     return;
   }
   if (msg.t === "match") startMatch(msg);
+  if (msg.t === "rematch") {
+    if (msg.raceId !== state.raceId || state.phase !== "results") return;
+    state.rematch = msg;
+    paintRematch();
+  }
 }
 
 function startMatch(msg) {
@@ -857,6 +926,7 @@ function startMatch(msg) {
   state.players = msg.players || [];
   state.live = (msg.players || []).map((player) => ({ id: player.id, i: 0, wpm: 0, finishedAt: null }));
   state.results = null;
+  state.rematch = null;
   state.phase = serverNow() < state.startAt ? "countdown" : "race";
   state.shell = "";
   sessionStorage.setItem("tg_race", msg.raceId);
@@ -963,6 +1033,7 @@ function leaveRace() {
   state.live = [];
   state.room = null;
   state.queue = null;
+  state.rematch = null;
   const url = new URL(location.href);
   url.searchParams.delete("room");
   history.replaceState({}, "", url.pathname);

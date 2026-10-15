@@ -27,6 +27,7 @@ export class Lobby {
     this.ctx = ctx;
     this.env = env;
     this.holding = Object.create(null);
+    this.rematchHold = Object.create(null);
   }
 
   sockets() {
@@ -56,6 +57,49 @@ export class Lobby {
 
   roomMembers(code) {
     return this.sockets().filter((entry) => entry.att.status === "room" && entry.att.room === code);
+  }
+
+  rematchGroup(raceId) {
+    return this.sockets().filter((entry) => (
+      entry.att.lastRace === raceId
+      && (entry.att.status === "matched" || entry.att.status === "rematch")
+    ));
+  }
+
+  async releaseGroup(ws, att) {
+    const raceId = att.lastRace;
+    const inGroup = raceId && (att.status === "matched" || att.status === "rematch");
+    if (!inGroup) return;
+    att.lastRace = null;
+    ws.serializeAttachment(att);
+    await this.syncRematch(raceId);
+  }
+
+  async syncRematch(raceId, notice) {
+    if (!raceId || this.rematchHold[raceId]) return;
+    const group = this.rematchGroup(raceId);
+    const ready = group.filter((entry) => entry.att.status === "rematch");
+    if (ready.length >= 2) {
+      const mode = ready[0].att.mode;
+      const length = readLength(ready[0].att.length);
+      if (!isMode(mode)) return;
+      this.rematchHold[raceId] = true;
+      let launched = false;
+      try {
+        launched = await this.launch(ready, mode, length, Boolean(ready[0].att.ranked));
+      } finally {
+        this.rematchHold[raceId] = false;
+      }
+      if (launched) await this.syncRematch(raceId, { started: true });
+      return;
+    }
+    const payload = {
+      t: "rematch",
+      raceId,
+      ready: ready.map((entry) => entry.att.user.id),
+      started: Boolean(notice?.started) && ready.length === 0,
+    };
+    for (const entry of group) this.send(entry.ws, payload);
   }
 
   announce(mode, length) {
@@ -136,6 +180,7 @@ export class Lobby {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
       const previousRoom = att.status === "room" ? att.room : null;
       const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
+      await this.releaseGroup(ws, att);
       att.status = "queue";
       att.mode = msg.mode;
       att.length = readLength(msg.length);
@@ -151,6 +196,7 @@ export class Lobby {
 
     if (msg.t === "practice") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
+      await this.releaseGroup(ws, att);
       att.mode = msg.mode;
       att.length = readLength(msg.length);
       ws.serializeAttachment(att);
@@ -158,8 +204,43 @@ export class Lobby {
       return;
     }
 
+    if (msg.t === "rematch") {
+      const raceId = String(msg.raceId || "");
+      if (!/^[0-9a-f-]{36}$/i.test(raceId)) return;
+      const record = await this.ctx.storage.get(`rematch:${raceId}`);
+      const sameSocket = att.lastRace === raceId && (att.status === "matched" || att.status === "rematch");
+      const listed = record && record.until >= Date.now() && Array.isArray(record.ids) && record.ids.includes(att.user.id);
+      if (!sameSocket && !listed) return this.send(ws, { t: "error", error: "That rematch is closed." });
+      if (!sameSocket) {
+        if (!isMode(record.mode)) return this.send(ws, { t: "error", error: "That rematch is closed." });
+        att.mode = record.mode;
+        att.length = readLength(record.length);
+        att.ranked = Boolean(record.ranked);
+      }
+      const previousRoom = att.status === "room" ? att.room : null;
+      const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
+      att.status = "rematch";
+      att.lastRace = raceId;
+      att.room = null;
+      att.host = false;
+      ws.serializeAttachment(att);
+      if (previousRoom) this.emitRoom(previousRoom);
+      if (previous) this.announce(previous.mode, previous.length);
+      await this.syncRematch(raceId);
+      return;
+    }
+
+    if (msg.t === "rematch_cancel") {
+      if (att.status !== "rematch" || !att.lastRace) return;
+      att.status = "matched";
+      ws.serializeAttachment(att);
+      await this.syncRematch(att.lastRace);
+      return;
+    }
+
     if (msg.t === "room_create") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
+      await this.releaseGroup(ws, att);
       const previousRoom = att.status === "room" ? att.room : null;
       let code = roomCode();
       for (let i = 0; i < 5 && this.roomMembers(code).length; i++) code = roomCode();
@@ -180,6 +261,7 @@ export class Lobby {
       const members = this.roomMembers(code);
       if (!members.length) return this.send(ws, { t: "error", error: "That room is not open." });
       if (members.length >= 6) return this.send(ws, { t: "error", error: "That room is full." });
+      await this.releaseGroup(ws, att);
       const host = members.find((entry) => entry.att.host) || members[0];
       const previousRoom = att.status === "room" ? att.room : null;
       att.status = "room";
@@ -207,6 +289,7 @@ export class Lobby {
     if (msg.t === "leave") {
       const previousRoom = att.status === "room" ? att.room : null;
       const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
+      await this.releaseGroup(ws, att);
       att.status = "idle";
       att.room = null;
       att.host = false;
@@ -221,6 +304,7 @@ export class Lobby {
     if (!att?.user) return;
     if (att.status === "room" && att.room) this.emitRoom(att.room);
     if (att.status === "queue" && att.mode) this.announce(att.mode, readLength(att.length));
+    if (att.lastRace && (att.status === "matched" || att.status === "rematch")) await this.syncRematch(att.lastRace);
   }
 
   laneKey(mode, length) {
@@ -281,6 +365,13 @@ export class Lobby {
         body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked, players }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
+      await this.ctx.storage.put(`rematch:${raceId}`, {
+        mode,
+        length: lane,
+        ranked: Boolean(ranked),
+        ids: players.map((player) => player.id),
+        until: Date.now() + 180000,
+      });
       const match = {
         t: "match",
         raceId,
@@ -292,7 +383,15 @@ export class Lobby {
         ranked,
         players,
       };
-      for (const entry of live) this.send(entry.ws, match);
+      for (const entry of live) {
+        entry.att.lastRace = raceId;
+        entry.att.mode = mode;
+        entry.att.length = lane;
+        entry.att.ranked = Boolean(ranked);
+        entry.att.status = "matched";
+        entry.ws.serializeAttachment(entry.att);
+        this.send(entry.ws, match);
+      }
       this.announce(mode, lane);
       return true;
     } catch (error) {

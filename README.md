@@ -18,7 +18,7 @@ Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer
 2. Pick a ladder: Desktop, Mobile, or Cursor.
 3. Queue, practice alone, or share a 4-character room.
 4. The lobby Durable Object gives the whole room one passage and one start time. A sprint is one sentence, a set is three, and a long race is five. The queue only pairs racers who picked the same ladder and the same length.
-5. A race Durable Object watches progress. The first completed passage it receives is first place. The race ends when everyone has finished, or when the clock runs out: 2 minutes, 4 minutes, or 6 minutes.
+5. A race Durable Object watches progress. The first completed passage it receives is first place. The race ends when everyone has finished, or when the clock runs out: 2 minutes, 4 minutes, or 6 minutes. Rematch keeps the same ladder and length. A practice rematch starts at once. A rated rematch starts when two or more people from that race click Rematch, on a new passage.
 6. Rated matches update that ladder's Elo. Practice does not.
 
 Desktop and Mobile are separate keyboard ladders. Cursor is mouse only: the page draws a keyboard and ignores letter keys. Touch on that ladder does not type. Each ladder has its own Elo, starting at 1000.
