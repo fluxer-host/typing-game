@@ -1,0 +1,9 @@
+# Copy to .dev.vars for local `wrangler dev`. This file is not deployed.
+# Generate a long random SESSION_SECRET. Do not reuse the example value.
+SESSION_SECRET=replace-with-a-long-random-string
+ALLOW_DEV_LOGIN=true
+
+# Production OAuth. Register the same redirect on the Fluxer application.
+# FLUXER_CLIENT_ID=
+# FLUXER_CLIENT_SECRET=
+# FLUXER_REDIRECT_URI=https://typing.fluxer.games/auth/callback

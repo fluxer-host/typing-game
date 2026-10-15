@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>typing.fluxer.games</title>
+  <meta name="description" content="Race other Fluxer users on the same sentence. Desktop, mobile, and mouse-only cursor ladders.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <a class="brand" href="/">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect width="32" height="32" rx="8" fill="#4641D9"/>
+          <path d="M7 21c3-8 5-8 8 0s5 8 9 0" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+          <rect x="23" y="8" width="2" height="12" rx="1" fill="#fff"/>
+        </svg>
+        <span class="brand-name">typing<span>.fluxer.games</span></span>
+      </a>
+      <div id="account"></div>
+    </header>
+    <main class="layout">
+      <section class="stage" id="stage">
+        <p class="loading">Loading the track…</p>
+      </section>
+      <aside class="side">
+        <section id="lanes"></section>
+        <section id="you"></section>
+        <section id="board"></section>
+        <section id="recent"></section>
+      </aside>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <noscript><p class="noscript">This track needs JavaScript to race.</p></noscript>
+  <script src="/app.js"></script>
+</body>
+</html>
