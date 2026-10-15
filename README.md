@@ -1,6 +1,6 @@
-# typing.fluxer.games
+# Typing race
 
-A typing race for Fluxer accounts. Everyone in a match gets the same sentence, types it, and the server records who finished first.
+A typing race for Fluxer accounts. Everyone in a match gets the same sentence, types it, and the server records who finished first. The site answers on whatever hostname reaches the Worker. The header and the page title show that hostname, so `typing.fluxer.my`, a `workers.dev` host, and local `127.0.0.1:8787` are the same app.
 
 ## Deploy on Workers, with static assets
 
@@ -10,7 +10,7 @@ Pages can host the HTML, and Pages Functions can run the OAuth routes. The race 
 
 Static files in `public/` are still served from the edge. Requests for `/api/*`, `/auth/*`, and `/ws` run the Worker first. Everything else is an asset.
 
-The custom domain `typing.fluxer.games` attaches to that Worker after the zone is on the same Cloudflare account.
+Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer.my` is one example. The Worker does not contain that name.
 
 ## What a match does
 
@@ -49,9 +49,11 @@ npm run test:live    # while wrangler dev is running
 
 Create an application with `POST /v1/oauth2/applications` while signed in to Fluxer (user session, not a bot token). The docs are at https://docs.fluxer.app/http-api/applications/ and https://docs.fluxer.app/http-api/oauth2/ . The client id is the application id. The client secret is returned once, from create or from reset client secret.
 
-Register these redirect URIs exactly. Fluxer compares them byte for byte. HTTP is allowed only for localhost, a `.localhost` host, or an IP literal. The public site has to be HTTPS.
+Register each public origin's callback exactly. Fluxer compares them byte for byte. HTTP is allowed only for localhost, a `.localhost` host, or an IP literal. Every other host has to be HTTPS.
 
-- `https://typing.fluxer.games/auth/callback`
+The Worker builds the callback from the host the browser called, plus `/auth/callback`, unless `FLUXER_REDIRECT_URI` is set. Leave that secret unset when more than one hostname should be able to sign in. Set it only when every login should return to one host. Examples:
+
+- `https://typing.fluxer.my/auth/callback`
 - `http://127.0.0.1:8787/auth/callback` if you want to try OAuth locally
 
 The site asks only for the `identify` scope. It stores the refresh token so sign-out can revoke the grant. Access tokens last 7 days, refresh tokens 30 days.
@@ -78,17 +80,19 @@ npx wrangler secret put FLUXER_CLIENT_SECRET
 npx wrangler secret put SESSION_SECRET
 ```
 
-`SESSION_SECRET` should be a long random string. Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` if the callback is not `{the worker origin}/auth/callback`.
+`SESSION_SECRET` should be a long random string. Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://typing.fluxer.my/auth/callback`. Leave it unset and the callback follows the host in the address bar.
 
 ```bash
 npm run deploy
 ```
 
-In the Cloudflare dashboard, attach `typing.fluxer.games` to the `typing-fluxer` Worker. Or add this to `wrangler.jsonc` once the zone is on the account and deploy again:
+In the Cloudflare dashboard, attach the hostname to the `typing-fluxer` Worker. Or add the route once that zone is on the account and deploy again. For `typing.fluxer.my`:
 
 ```jsonc
-"routes": [{ "pattern": "typing.fluxer.games", "custom_domain": true }]
+"routes": [{ "pattern": "typing.fluxer.my", "custom_domain": true }]
 ```
+
+Another hostname is the same line with that name. Each one you sign in from also needs its `/auth/callback` on the Fluxer application.
 
 Do not set `ALLOW_DEV_LOGIN` to `true` in the deployed vars.
 

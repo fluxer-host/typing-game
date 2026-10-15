@@ -20,6 +20,28 @@ const ROWS = [
   ["z", "x", "c", "v", "b", "n", "m", ",", ".", "?"],
 ];
 
+function paintBrand() {
+  const host = location.host;
+  const node = document.querySelector(".brand-name");
+  if (!node) return;
+  document.title = host;
+  const dot = host.indexOf(".");
+  const head = dot > 0 ? host.slice(0, dot) : host;
+  const tail = dot > 0 ? host.slice(dot) : "";
+  const address = /^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?$/.test(host) || host.startsWith("[");
+  node.replaceChildren();
+  if (!address && tail && /^[A-Za-z0-9-]+$/.test(head)) {
+    node.append(document.createTextNode(head));
+    const rest = document.createElement("span");
+    rest.textContent = tail;
+    node.append(rest);
+    return;
+  }
+  node.textContent = host;
+}
+
+paintBrand();
+
 const AUTH_ERRORS = {
   denied: "Fluxer did not grant access.",
   bot: "Bot accounts cannot race.",

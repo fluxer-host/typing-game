@@ -73,7 +73,7 @@ const config = await (await fetch(`${base}/api/config`)).json();
 assert(config.devLogin === true, "dev login should be on locally");
 const page = await fetch(`${base}/`);
 assert(page.ok, "home page failed");
-assert((await page.text()).includes("typing.fluxer.games"), "home page title missing");
+assert((await page.text()).includes("Typing race"), "home page title missing");
 const bad = await fetch(`${base}/api/leaderboard?mode=nope`);
 assert(bad.status === 400, "bad mode should be 400");
 
