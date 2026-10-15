@@ -594,8 +594,8 @@ function resultsView() {
   const actions = h("div", { class: "result-actions" });
   actions.append(
     h("button", { id: "rematch-btn", class: "btn primary", type: "button", "data-action": "rematch", text: "Rematch", onclick: askRematch }),
-    h("button", { class: "btn", type: "button", text: "Queue again", onclick: () => { leaveRace(); sendLobby({ t: "queue", mode: state.mode, length: state.length }); } }),
-    h("button", { class: "btn", type: "button", text: "Practice", onclick: () => { leaveRace(); sendLobby({ t: "practice", mode: state.mode, length: state.length }); } }),
+    h("button", { class: "btn", type: "button", "data-action": "queue-again", text: "Queue again", onclick: queueAgain }),
+    h("button", { class: "btn", type: "button", "data-action": "practice-again", text: "Practice", onclick: practiceAgain }),
     h("button", { class: "btn ghost", type: "button", text: "Lobby", onclick: () => { sendLobby({ t: "leave" }); leaveRace(); } }),
   );
   box.append(actions);
@@ -1101,10 +1101,41 @@ function absorbResults(msg) {
   loadMeta().then(() => renderSide());
 }
 
-function leaveRace() {
+function releaseRaceSocket() {
   sessionStorage.removeItem("tg_race");
   if (raceSocket) raceSocket.close();
   raceSocket = null;
+  const url = new URL(location.href);
+  url.searchParams.delete("room");
+  history.replaceState({}, "", url.pathname);
+}
+
+function practiceAgain() {
+  const mode = state.mode;
+  const length = state.length;
+  releaseRaceSocket();
+  sendLobby({ t: "practice", mode, length });
+}
+
+function queueAgain() {
+  const mode = state.mode;
+  const length = state.length;
+  releaseRaceSocket();
+  state.phase = "queue";
+  state.results = null;
+  state.sentence = "";
+  state.typed = "";
+  state.players = [];
+  state.live = [];
+  state.room = null;
+  state.rematch = null;
+  state.queue = { waiting: 1, mode, length };
+  ensure();
+  sendLobby({ t: "queue", mode, length });
+}
+
+function leaveRace() {
+  releaseRaceSocket();
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
@@ -1114,9 +1145,6 @@ function leaveRace() {
   state.room = null;
   state.queue = null;
   state.rematch = null;
-  const url = new URL(location.href);
-  url.searchParams.delete("room");
-  history.replaceState({}, "", url.pathname);
   ensure();
 }
 
