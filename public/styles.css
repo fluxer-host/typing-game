@@ -227,6 +227,7 @@ button { cursor: pointer; }
   inset: 0;
   display: grid;
   place-items: center;
+  pointer-events: none;
   font-size: 5.5rem;
   font-weight: 750;
   letter-spacing: -0.05em;

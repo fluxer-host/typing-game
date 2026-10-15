@@ -436,7 +436,7 @@ export class Lobby {
       const lane = readLength(length);
       const raceId = crypto.randomUUID();
       const sentence = pickPassage(mode, LENGTHS[lane].sentences);
-      const startAt = Date.now() + 3800;
+      const startAt = Date.now() + 3000;
       const stub = this.env.RACE.get(this.env.RACE.idFromName(raceId));
       const response = await stub.fetch("https://race.internal/init", {
         method: "POST",

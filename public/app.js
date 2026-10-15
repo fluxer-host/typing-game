@@ -1216,19 +1216,24 @@ setInterval(() => {
   const count = document.getElementById("count");
   if (!count) return;
   const left = state.startAt - serverNow();
-  if (left > 2800) showCount(count, "3");
-  else if (left > 1800) showCount(count, "2");
-  else if (left > 800) showCount(count, "1");
-  else if (left > 0) showCount(count, "go");
-  else {
+  if (left > 2000) showCount(count, "3");
+  else if (left > 1000) showCount(count, "2");
+  else if (left > 0) showCount(count, "1");
+  else if (left > -650) {
+    showCount(count, "go");
+    beginRace();
+  } else {
     count.hidden = true;
-    if (state.phase === "countdown") {
-      state.phase = "race";
-      if (state.mode === "mobile") document.getElementById("capture")?.focus({ preventScroll: true });
-    }
+    beginRace();
   }
   paintStats();
 }, 80);
+
+function beginRace() {
+  if (state.phase !== "countdown") return;
+  state.phase = "race";
+  if (state.mode === "mobile") document.getElementById("capture")?.focus({ preventScroll: true });
+}
 
 function showCount(node, text) {
   node.hidden = false;
