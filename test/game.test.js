@@ -6,7 +6,8 @@ import { MODE_COLUMNS } from "../src/modes.js";
 import { buildResults } from "../src/results.js";
 import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
-import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
+import { LENGTHS, lengthList } from "../src/lengths.js";
+import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
 
 test("sentences stay on the shared keyboard", () => {
   assert.ok(SENTENCES.some((row) => row.text === "I love Fluxer" && row.cursor));
@@ -21,6 +22,24 @@ test("sentences stay on the shared keyboard", () => {
     assert.equal(isKnownSentence(pickSentence("cursor")), true);
     assert.equal(isKnownSentence(pickSentence("desktop")), true);
   }
+});
+
+test("a passage is one, three, or five known sentences", () => {
+  assert.deepEqual(lengthList().map((row) => row.sentences), [1, 3, 5]);
+  for (const [id, spec] of Object.entries(LENGTHS)) {
+    for (const mode of ["desktop", "cursor"]) {
+      const text = pickPassage(mode, spec.sentences);
+      assert.equal(passageOk(mode, spec.sentences, text), true, `${mode} ${id}`);
+      assert.equal(passageOk(mode, spec.sentences, `${text} extra`), false);
+      if (mode === "cursor") assert.equal(cursorCanType(text), true);
+    }
+  }
+  assert.equal(passageOk("cursor", 1, pickSentence("cursor")), true);
+  assert.equal(passageOk("desktop", 1, "I love Fluxer"), true);
+  assert.equal(passageOk("cursor", 1, "Fluxer started as a high school project."), false);
+  const joined = ["I love Fluxer", "Flux means change.", "Chat is motion."].join(" ");
+  assert.equal(passageOk("cursor", 3, joined), true);
+  assert.equal(passageOk("cursor", 1, joined), false);
 });
 
 test("the cursor keyboard in the page covers every cursor key", () => {

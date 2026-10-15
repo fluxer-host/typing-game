@@ -1,9 +1,10 @@
 import { saveRace } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
+import { isLength, LENGTHS } from "./lengths.js";
 import { isMode } from "./modes.js";
 import { buildResults } from "./results.js";
-import { isKnownSentence } from "./sentences.js";
+import { passageOk } from "./sentences.js";
 import { wpm } from "./score.js";
 
 const RACE_LIMIT_MS = 120000;
@@ -89,7 +90,11 @@ export class Race {
     } catch {
       return json({ error: "body" }, { status: 400 });
     }
-    if (!isMode(body.mode) || !isKnownSentence(body.sentence)) return json({ error: "race" }, { status: 400 });
+    const length = isLength(body.length) ? body.length : "sprint";
+    const limitMs = LENGTHS[length].limitMs;
+    if (!isMode(body.mode) || !passageOk(body.mode, LENGTHS[length].sentences, body.sentence)) {
+      return json({ error: "race" }, { status: 400 });
+    }
     if (!Array.isArray(body.players) || body.players.length < 1 || body.players.length > 6) {
       return json({ error: "players" }, { status: 400 });
     }
@@ -109,6 +114,8 @@ export class Race {
     this.state = {
       raceId: String(body.raceId),
       mode: body.mode,
+      length,
+      limitMs,
       ranked: Boolean(body.ranked),
       sentence: body.sentence,
       startAt,
@@ -119,7 +126,7 @@ export class Race {
       saved: false,
     };
     await this.persist();
-    await this.ctx.storage.setAlarm(startAt + RACE_LIMIT_MS);
+    await this.ctx.storage.setAlarm(startAt + limitMs);
     return json({ ok: true });
   }
 
@@ -131,6 +138,7 @@ export class Race {
       startAt: this.state.startAt,
       serverNow: Date.now(),
       mode: this.state.mode,
+      length: this.state.length || "sprint",
       ranked: this.state.ranked,
       players: this.state.players,
       progress: this.state.progress,
@@ -195,7 +203,7 @@ export class Race {
       }
       return;
     }
-    if (Date.now() > this.state.startAt + RACE_LIMIT_MS) {
+    if (Date.now() > this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS)) {
       await this.finalize();
       return;
     }

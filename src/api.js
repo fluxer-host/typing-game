@@ -1,6 +1,7 @@
 import { leaderboard, recentRaces } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
+import { lengthList } from "./lengths.js";
 import { isMode, MODE_LIST } from "./modes.js";
 import { publicPlayer } from "./profile.js";
 
@@ -9,6 +10,7 @@ export function config(env) {
     oauth: Boolean(env.FLUXER_CLIENT_ID && env.FLUXER_CLIENT_SECRET),
     devLogin: env.ALLOW_DEV_LOGIN === "true",
     modes: MODE_LIST,
+    lengths: lengthList(),
     media: env.MEDIA_BASE || "https://fluxerusercontent.com",
     staticCdn: env.STATIC_CDN || "https://fluxerstatic.com",
   });

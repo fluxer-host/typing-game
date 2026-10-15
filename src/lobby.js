@@ -1,13 +1,18 @@
 import { getUsers } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
+import { isLength, LENGTHS } from "./lengths.js";
 import { isMode } from "./modes.js";
 import { publicPlayer } from "./profile.js";
-import { pickSentence } from "./sentences.js";
+import { pickPassage } from "./sentences.js";
 
 const GATHER_MS = 1500;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function readLength(value) {
+  return isLength(value) ? value : "sprint";
+}
 
 function roomCode() {
   const bytes = new Uint8Array(4);
@@ -41,20 +46,26 @@ export class Lobby {
     }
   }
 
-  queued(mode) {
-    return this.sockets().filter((entry) => entry.att.status === "queue" && entry.att.mode === mode);
+  queued(mode, length) {
+    return this.sockets().filter((entry) => (
+      entry.att.status === "queue"
+      && entry.att.mode === mode
+      && readLength(entry.att.length) === length
+    ));
   }
 
   roomMembers(code) {
     return this.sockets().filter((entry) => entry.att.status === "room" && entry.att.room === code);
   }
 
-  announce(mode) {
-    const waiting = this.queued(mode);
+  announce(mode, length) {
+    const lane = readLength(length);
+    const waiting = this.queued(mode, lane);
     for (const entry of waiting) {
       this.send(entry.ws, {
         t: "queued",
         mode,
+        length: lane,
         waiting: waiting.length,
         serverNow: Date.now(),
         gatherMs: waiting.length >= 2 ? GATHER_MS : null,
@@ -75,6 +86,7 @@ export class Lobby {
         t: "room",
         code,
         mode: entry.att.mode,
+        length: readLength(entry.att.length),
         youHost: Boolean(entry.att.host),
         players,
       });
@@ -101,7 +113,7 @@ export class Lobby {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ status: "idle", user: player, mode: null, room: null, host: false });
+    server.serializeAttachment({ status: "idle", user: player, mode: null, length: "sprint", room: null, host: false });
     server.send(JSON.stringify({ t: "hello", you: player, serverNow: Date.now() }));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -123,22 +135,26 @@ export class Lobby {
     if (msg.t === "queue") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
       const previousRoom = att.status === "room" ? att.room : null;
+      const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
       att.status = "queue";
       att.mode = msg.mode;
+      att.length = readLength(msg.length);
       att.room = null;
       att.host = false;
       ws.serializeAttachment(att);
       if (previousRoom) this.emitRoom(previousRoom);
-      this.announce(msg.mode);
-      await this.consider(msg.mode);
+      if (previous && (previous.mode !== att.mode || previous.length !== att.length)) this.announce(previous.mode, previous.length);
+      this.announce(att.mode, att.length);
+      await this.consider(att.mode, att.length);
       return;
     }
 
     if (msg.t === "practice") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
       att.mode = msg.mode;
+      att.length = readLength(msg.length);
       ws.serializeAttachment(att);
-      await this.launch([{ ws, att }], msg.mode, false);
+      await this.launch([{ ws, att }], att.mode, att.length, false);
       return;
     }
 
@@ -149,6 +165,7 @@ export class Lobby {
       for (let i = 0; i < 5 && this.roomMembers(code).length; i++) code = roomCode();
       att.status = "room";
       att.mode = msg.mode;
+      att.length = readLength(msg.length);
       att.room = code;
       att.host = true;
       ws.serializeAttachment(att);
@@ -163,9 +180,11 @@ export class Lobby {
       const members = this.roomMembers(code);
       if (!members.length) return this.send(ws, { t: "error", error: "That room is not open." });
       if (members.length >= 6) return this.send(ws, { t: "error", error: "That room is full." });
+      const host = members.find((entry) => entry.att.host) || members[0];
       const previousRoom = att.status === "room" ? att.room : null;
       att.status = "room";
-      att.mode = members[0].att.mode;
+      att.mode = host.att.mode;
+      att.length = readLength(host.att.length);
       att.room = code;
       att.host = false;
       ws.serializeAttachment(att);
@@ -181,19 +200,19 @@ export class Lobby {
         this.send(ws, { t: "error", error: "Need two racers in the room." });
         return;
       }
-      await this.launch(members, att.mode, true);
+      await this.launch(members, att.mode, readLength(att.length), true);
       return;
     }
 
     if (msg.t === "leave") {
       const previousRoom = att.status === "room" ? att.room : null;
-      const previousMode = att.status === "queue" ? att.mode : null;
+      const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
       att.status = "idle";
       att.room = null;
       att.host = false;
       ws.serializeAttachment(att);
       if (previousRoom) this.emitRoom(previousRoom);
-      if (previousMode) this.announce(previousMode);
+      if (previous) this.announce(previous.mode, previous.length);
     }
   }
 
@@ -201,31 +220,37 @@ export class Lobby {
     const att = ws.deserializeAttachment();
     if (!att?.user) return;
     if (att.status === "room" && att.room) this.emitRoom(att.room);
-    if (att.status === "queue" && att.mode) this.announce(att.mode);
+    if (att.status === "queue" && att.mode) this.announce(att.mode, readLength(att.length));
   }
 
-  async consider(mode) {
-    if (this.holding[mode]) return;
-    const ready = this.queued(mode);
+  laneKey(mode, length) {
+    return `${mode}:${readLength(length)}`;
+  }
+
+  async consider(mode, length) {
+    const lane = readLength(length);
+    const key = this.laneKey(mode, lane);
+    if (this.holding[key]) return;
+    const ready = this.queued(mode, lane);
     if (ready.length >= 4) {
-      const launched = await this.launch(ready.slice(0, 4), mode, true);
-      if (launched && this.queued(mode).length >= 2) await this.consider(mode);
+      const launched = await this.launch(ready.slice(0, 4), mode, lane, true);
+      if (launched && this.queued(mode, lane).length >= 2) await this.consider(mode, lane);
       return;
     }
     if (ready.length < 2) return;
-    this.holding[mode] = true;
+    this.holding[key] = true;
     let launched = false;
     try {
       await delay(GATHER_MS);
-      const gathered = this.queued(mode);
-      if (gathered.length >= 2) launched = await this.launch(gathered.slice(0, 4), mode, true);
+      const gathered = this.queued(mode, lane);
+      if (gathered.length >= 2) launched = await this.launch(gathered.slice(0, 4), mode, lane, true);
     } finally {
-      this.holding[mode] = false;
+      this.holding[key] = false;
     }
-    if (launched && this.queued(mode).length >= 2) await this.consider(mode);
+    if (launched && this.queued(mode, lane).length >= 2) await this.consider(mode, lane);
   }
 
-  async launch(members, mode, ranked) {
+  async launch(members, mode, length, ranked) {
     const live = members.filter((entry) => entry.ws.readyState === WebSocket.OPEN);
     if (!live.length) return false;
     if (ranked && live.length < 2) return false;
@@ -245,14 +270,15 @@ export class Lobby {
         entry.ws.serializeAttachment(entry.att);
         return { ...player, eloAtStart: player.elo?.[mode] ?? 1000 };
       });
+      const lane = readLength(length);
       const raceId = crypto.randomUUID();
-      const sentence = pickSentence(mode);
+      const sentence = pickPassage(mode, LENGTHS[lane].sentences);
       const startAt = Date.now() + 3800;
       const stub = this.env.RACE.get(this.env.RACE.idFromName(raceId));
       const response = await stub.fetch("https://race.internal/init", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ raceId, sentence, startAt, mode, ranked, players }),
+        body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked, players }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
       const match = {
@@ -262,11 +288,12 @@ export class Lobby {
         startAt,
         serverNow: Date.now(),
         mode,
+        length: lane,
         ranked,
         players,
       };
       for (const entry of live) this.send(entry.ws, match);
-      this.announce(mode);
+      this.announce(mode, lane);
       return true;
     } catch (error) {
       console.error("launch failed", error);
@@ -277,7 +304,7 @@ export class Lobby {
       });
       const rooms = new Set(live.map((entry) => entry.att.room).filter(Boolean));
       for (const code of rooms) this.emitRoom(code);
-      this.announce(mode);
+      this.announce(mode, length);
       return false;
     }
   }

@@ -41,6 +41,9 @@ function track(ws) {
         waiters.push({ pred, resolve, reject, timer });
       });
     },
+    has(pred) {
+      return queue.some(pred);
+    },
   };
 }
 
@@ -64,13 +67,14 @@ async function finish(sock, tracker, sentence) {
   for (let i = 1; i <= sentence.length; i++) {
     sock.send(JSON.stringify({ t: i === sentence.length ? "fin" : "prog", i, ok: i, err: 0 }));
   }
-  return tracker.next((msg) => msg.t === "state" && msg.players.some((player) => player.i === sentence.length && player.finishedAt));
+  return tracker.next((msg) => msg.t === "state" && msg.players.some((player) => player.i === sentence.length && player.finishedAt), 20000);
 }
 
 const health = await fetch(`${base}/api/health`);
 assert(health.ok, "health failed, apply D1 migrations");
 const config = await (await fetch(`${base}/api/config`)).json();
 assert(config.devLogin === true, "dev login should be on locally");
+assert(config.lengths?.map((row) => row.id).join(",") === "sprint,set,long", "length list");
 const page = await fetch(`${base}/`);
 assert(page.ok, "home page failed");
 assert((await page.text()).includes("Typing race"), "home page title missing");
@@ -86,14 +90,23 @@ const adaWs = adaLobby.ws;
 const beaSocket = beaLobby.ws;
 const adaTrack = adaLobby.tracker;
 const beaTrack = beaLobby.tracker;
-beaSocket.send(JSON.stringify({ t: "queue", mode: "desktop" }));
-adaWs.send(JSON.stringify({ t: "queue", mode: "desktop" }));
+adaWs.send(JSON.stringify({ t: "queue", mode: "desktop", length: "long" }));
+beaSocket.send(JSON.stringify({ t: "queue", mode: "desktop", length: "sprint" }));
+await new Promise((resolve) => setTimeout(resolve, 2200));
+assert(!adaTrack.has((msg) => msg.t === "match"), "a long queue matched a sprint");
+assert(!beaTrack.has((msg) => msg.t === "match"), "a sprint queue matched a long");
+adaWs.send(JSON.stringify({ t: "leave" }));
+beaSocket.send(JSON.stringify({ t: "leave" }));
+await new Promise((resolve) => setTimeout(resolve, 100));
+beaSocket.send(JSON.stringify({ t: "queue", mode: "desktop", length: "sprint" }));
+adaWs.send(JSON.stringify({ t: "queue", mode: "desktop", length: "sprint" }));
 
 const adaMatch = await adaTrack.next((msg) => msg.t === "match");
 const beaMatch = await beaTrack.next((msg) => msg.t === "match");
 assert(adaMatch.raceId === beaMatch.raceId, "racers got different rooms");
 assert(adaMatch.sentence === beaMatch.sentence, "racers got different sentences");
 assert(adaMatch.ranked === true, "queue should be rated");
+assert(adaMatch.length === "sprint", "queue length");
 assert(adaMatch.sentence.length > 0, "empty sentence");
 
 const wait = Math.max(0, adaMatch.startAt - Date.now() + 120);
@@ -128,9 +141,11 @@ assert(adaProfile.user.elo.desktop === 984, "profile elo was not saved");
 const beaProfile = await (await fetch(`${base}/api/me`, { headers: { cookie: `tg_session=${bea.token}` } })).json();
 assert(beaProfile.user.wins.desktop === 1, "win was not counted");
 
-adaWs.send(JSON.stringify({ t: "practice", mode: "cursor" }));
+adaWs.send(JSON.stringify({ t: "practice", mode: "cursor", length: "set" }));
 const practice = await adaTrack.next((msg) => msg.t === "match" && msg.ranked === false);
 assert(practice.mode === "cursor", "practice mode");
+assert(practice.length === "set", "practice length");
+assert(practice.sentence.length >= 48, "a set should be three sentences");
 const practiceConn = await openSocket(`${wsBase}/ws?race=${practice.raceId}&t=${encodeURIComponent(ada.token)}`);
 const practiceWs = practiceConn.ws;
 const practiceTrack = practiceConn.tracker;

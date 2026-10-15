@@ -57,6 +57,7 @@ const state = {
   recent: [],
   board: [],
   mode: localStorage.getItem("tg_mode") || "desktop",
+  length: localStorage.getItem("tg_length") || "sprint",
   phase: "lobby",
   sentence: "",
   typed: "",
@@ -174,6 +175,10 @@ function initialNode(player, className) {
   });
 }
 
+function lengthInfo(id) {
+  return (state.config?.lengths || []).find((row) => row.id === id) || null;
+}
+
 function modeElo() {
   if (!state.me) return null;
   return state.me.elo?.[state.mode];
@@ -208,7 +213,7 @@ function paintShell() {
 function authView() {
   const box = h("div", {});
   box.append(h("h1", { class: "lead", text: "Race the room" }));
-  box.append(h("p", { class: "muted", text: "Everyone in a match gets the same Fluxer line. First finished sentence wins." }));
+  box.append(h("p", { class: "muted", text: "Everyone in a match gets the same Fluxer passage. First to finish wins." }));
   const actions = h("div", { class: "actions" });
   if (state.config.oauth) {
     actions.append(h("a", { class: "btn primary", href: "/auth/login", text: "Sign in with Fluxer" }));
@@ -267,11 +272,26 @@ function lobbyView() {
     modes.append(card);
   }
   box.append(modes);
+  const lengths = h("div", { class: "modes lengths" });
+  for (const info of state.config?.lengths || []) {
+    const card = h("button", {
+      class: `length${state.length === info.id ? " selected" : ""}`,
+      type: "button",
+      "data-length": info.id,
+      "aria-pressed": state.length === info.id ? "true" : "false",
+      onclick: () => chooseLength(info.id),
+    });
+    card.append(h("strong", { text: info.title }));
+    card.append(h("span", { text: info.blurb }));
+    lengths.append(card);
+  }
+  box.append(lengths);
   const actions = h("div", { class: "actions" });
+  const play = () => ({ mode: state.mode, length: state.length });
   actions.append(
-    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => sendLobby({ t: "queue", mode: state.mode }) }),
-    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => sendLobby({ t: "practice", mode: state.mode }) }),
-    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => sendLobby({ t: "room_create", mode: state.mode }) }),
+    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => sendLobby({ t: "queue", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => sendLobby({ t: "practice", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => sendLobby({ t: "room_create", ...play() }) }),
   );
   box.append(actions);
   const join = h("form", { class: "join" });
@@ -307,7 +327,8 @@ function queueView() {
 
 function queueCopy() {
   const waiting = state.queue?.waiting || 1;
-  if (waiting < 2) return `You are on the ${MODES[state.mode].title} ladder. Waiting for another racer.`;
+  const length = lengthInfo(state.length)?.title || "Sprint";
+  if (waiting < 2) return `You are on the ${MODES[state.mode].title} ladder, ${length}. Waiting for another racer.`;
   return `${waiting} racers are here. The room opens in a moment.`;
 }
 
@@ -316,7 +337,8 @@ function roomView() {
   const box = h("div", {});
   box.append(h("h1", { class: "lead", text: "Private room" }));
   box.append(h("div", { class: "code", id: "room-code-label", text: room?.code || "" }));
-  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} ladder. Share the code or the link.` }));
+  const roomLength = lengthInfo(state.length)?.title || "Sprint";
+  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength}. Share the code or the link.` }));
   const list = h("ul", { class: "room-list", id: "room-players" });
   box.append(list);
   const actions = h("div", { class: "actions" });
@@ -362,7 +384,8 @@ function roomView() {
 function raceView() {
   const box = h("div", { class: "race" });
   const top = h("div", { class: "race-top" });
-  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${state.ranked ? "rated" : "practice"}` }));
+  const raceLength = lengthInfo(state.length)?.title || "Sprint";
+  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${state.ranked ? "rated" : "practice"}` }));
   top.append(h("span", { class: "stats", id: "stats", text: "" }));
   box.append(top);
   const wrap = h("div", { class: "passage-wrap" });
@@ -495,8 +518,8 @@ function resultsView() {
   }
   const actions = h("div", { class: "result-actions" });
   actions.append(
-    h("button", { class: "btn primary", type: "button", text: "Queue again", onclick: () => { leaveRace(); sendLobby({ t: "queue", mode: state.mode }); } }),
-    h("button", { class: "btn", type: "button", text: "Practice", onclick: () => { leaveRace(); sendLobby({ t: "practice", mode: state.mode }); } }),
+    h("button", { class: "btn primary", type: "button", text: "Queue again", onclick: () => { leaveRace(); sendLobby({ t: "queue", mode: state.mode, length: state.length }); } }),
+    h("button", { class: "btn", type: "button", text: "Practice", onclick: () => { leaveRace(); sendLobby({ t: "practice", mode: state.mode, length: state.length }); } }),
     h("button", { class: "btn ghost", type: "button", text: "Lobby", onclick: () => leaveRace() }),
   );
   box.append(actions);
@@ -538,8 +561,19 @@ function paintModes() {
   }
 }
 
+function paintLengths() {
+  for (const button of document.querySelectorAll(".length[data-length]")) {
+    const on = button.dataset.length === state.length;
+    button.classList.toggle("selected", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
 function paintDynamic() {
-  if (state.shell === "lobby") paintModes();
+  if (state.shell === "lobby") {
+    paintModes();
+    paintLengths();
+  }
   if (state.shell === "queue") {
     const copy = document.getElementById("queue-copy");
     if (copy) copy.textContent = queueCopy();
@@ -567,6 +601,7 @@ function paintPassage() {
   const box = document.getElementById("passage");
   if (!box) return;
   const sentence = state.sentence;
+  box.classList.toggle("long", sentence.length > 160);
   const good = correctLength(state.typed, sentence);
   const wrong = state.typed.length > good;
   box.replaceChildren();
@@ -747,6 +782,14 @@ function chooseMode(mode) {
   loadBoard().then(() => ensure());
 }
 
+function chooseLength(length) {
+  if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (!lengthInfo(length)) return;
+  state.length = length;
+  localStorage.setItem("tg_length", length);
+  paintLengths();
+}
+
 function socketUrl(raceId) {
   const url = new URL("/ws", location.href);
   url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -781,12 +824,14 @@ function onLobby(event) {
     state.queue = msg;
     state.phase = "queue";
     state.mode = msg.mode;
+    if (msg.length) state.length = msg.length;
     ensure();
     return;
   }
   if (msg.t === "room") {
     state.room = msg;
     state.mode = msg.mode || state.mode;
+    if (msg.length) state.length = msg.length;
     state.phase = "room";
     const url = new URL(location.href);
     url.searchParams.set("room", msg.code);
@@ -807,6 +852,7 @@ function startMatch(msg) {
   state.offset = (msg.serverNow || Date.now()) - Date.now();
   state.raceId = msg.raceId;
   state.mode = msg.mode;
+  if (msg.length) state.length = msg.length;
   state.ranked = msg.ranked;
   state.players = msg.players || [];
   state.live = (msg.players || []).map((player) => ({ id: player.id, i: 0, wpm: 0, finishedAt: null }));
@@ -815,6 +861,7 @@ function startMatch(msg) {
   state.shell = "";
   sessionStorage.setItem("tg_race", msg.raceId);
   localStorage.setItem("tg_mode", state.mode);
+  if (state.length) localStorage.setItem("tg_length", state.length);
   ensure();
   openRace(msg.raceId);
 }
@@ -856,6 +903,7 @@ function absorbHello(msg) {
   state.startAt = msg.startAt;
   state.offset = msg.serverNow - Date.now();
   state.mode = msg.mode;
+  if (msg.length) state.length = msg.length;
   state.ranked = msg.ranked;
   state.players = msg.players || state.players;
   if (msg.results) {
@@ -1018,6 +1066,7 @@ async function boot() {
   }
   if (!MODES[state.mode]) state.mode = "desktop";
   state.config = await api("/api/config");
+  if (state.config.lengths?.length && !lengthInfo(state.length)) state.length = state.config.lengths[0].id;
   const me = await api("/api/me");
   state.me = me.user;
   await loadMeta();

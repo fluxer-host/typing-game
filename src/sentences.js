@@ -66,6 +66,37 @@ export function pickSentence(mode) {
   return pool[index].text;
 }
 
+export function pickPassage(mode, count) {
+  const pool = poolFor(mode).map((row) => row.text);
+  const bag = [...pool];
+  const chosen = [];
+  const total = Math.max(1, count);
+  for (let i = 0; i < total; i++) {
+    if (!bag.length) bag.push(...pool);
+    const index = Math.floor(Math.random() * bag.length);
+    chosen.push(bag.splice(index, 1)[0]);
+  }
+  return chosen.join(" ");
+}
+
+export function passageOk(mode, count, sentence) {
+  if (!Number.isInteger(count) || count < 1 || typeof sentence !== "string" || !sentence) return false;
+  const pool = poolFor(mode).map((row) => row.text);
+  let rest = sentence;
+  let seen = 0;
+  while (rest.length) {
+    const match = pool
+      .filter((text) => rest === text || rest.startsWith(`${text} `))
+      .sort((a, b) => b.length - a.length)[0];
+    if (!match) return false;
+    rest = rest.slice(match.length);
+    if (rest.startsWith(" ")) rest = rest.slice(1);
+    seen += 1;
+    if (seen > count) return false;
+  }
+  return seen === count;
+}
+
 export function isKnownSentence(text) {
   return SENTENCES.some((row) => row.text === text);
 }
