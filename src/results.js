@@ -1,16 +1,37 @@
 import { applyElo, eloDeltas } from "./elo.js";
 import { accuracy, wpm } from "./score.js";
 
+function presenceOf(state, id) {
+  return state.presence?.[id] || {};
+}
+
+function outcomeFor(presence, finished) {
+  if (finished) return "finished";
+  if (presence.forfeitWin) return "forfeit-win";
+  if (presence.forfeit) return "forfeit";
+  if (presence.dnfReason === "idle") return "timeout";
+  if (presence.dnfReason === "disconnect") return "disconnect";
+  return "dnf";
+}
+
+export function countsAsWin(row) {
+  return row.place === 1 && (row.ms != null || row.outcome === "forfeit-win");
+}
+
 function ordered(state) {
   const rows = state.players.map((player) => {
     const finish = state.finishes[player.id];
     const progress = state.progress[player.id] || { i: 0, ok: 0, err: 0 };
+    const presence = presenceOf(state, player.id);
     const dq = Boolean(progress.dq);
-    const finished = Boolean(finish) && !dq;
+    const finished = Boolean(finish) && !dq && !presence.forfeit && presence.dnfReason !== "idle" && presence.dnfReason !== "disconnect";
+    const forfeitWin = Boolean(presence.forfeitWin) && !finished;
     return {
       player,
       dq,
       finished,
+      forfeitWin,
+      outcome: outcomeFor({ ...presence, forfeitWin }, finished),
       at: finished ? finish.at : null,
       i: finished ? state.sentence.length : progress.i || 0,
       ok: (finished ? finish : progress).ok || 0,
@@ -18,7 +39,10 @@ function ordered(state) {
     };
   });
   rows.sort((a, b) => {
-    if (a.finished !== b.finished) return a.finished ? -1 : 1;
+    const group = (row) => (row.finished ? 0 : row.forfeitWin ? 1 : 2);
+    const ga = group(a);
+    const gb = group(b);
+    if (ga !== gb) return ga - gb;
     if (a.finished && b.finished) return a.at - b.at;
     if (a.i !== b.i) return b.i - a.i;
     return String(a.player.name).localeCompare(String(b.player.name));
@@ -54,6 +78,7 @@ export function buildResults(state, now) {
         color: row.player.color ?? null,
         place: row.place,
         finished: row.finished,
+        outcome: row.outcome,
         wpm: wpm(chars, elapsed),
         accuracy: typed > 0 ? accuracy(row.ok, row.err) : row.finished ? 100 : 0,
         ms: row.finished ? end - state.startAt : null,

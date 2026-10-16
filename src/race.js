@@ -4,6 +4,7 @@ import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { isMode } from "./modes.js";
 import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
+import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
 import { buildResults } from "./results.js";
 import { passageOk } from "./sentences.js";
 import { wpm } from "./score.js";
@@ -54,27 +55,91 @@ export class Race {
     }
   }
 
-  snapshot() {
-    const now = Date.now();
+  decisionState(now = Date.now()) {
+    const connected = this.connectedIds();
+    const presence = this.state.presence || {};
     return {
-      t: "state",
-      serverNow: now,
       startAt: this.state.startAt,
+      limitMs: this.state.limitMs || RACE_LIMIT_MS,
       players: this.state.players.map((player) => {
-        const finish = this.state.finishes[player.id];
-        const progress = this.state.progress[player.id] || { i: 0, ok: 0, err: 0 };
-        const index = finish ? this.state.sentence.length : progress.i || 0;
-        const end = finish?.at || now;
-        const elapsed = Math.max(0, Math.min(end, now) - this.state.startAt);
+        const row = presence[player.id] || {};
+        const progress = this.state.progress[player.id] || {};
+        const dq = Boolean(progress.dq);
+        const connectedNow = connected.has(player.id);
+        let disconnectedAt = row.disconnectedAt ?? null;
+        if (!connectedNow && disconnectedAt == null && now >= this.state.startAt) disconnectedAt = this.state.startAt;
+        const dnfReason = row.dnfReason === "idle" || row.dnfReason === "disconnect" ? row.dnfReason : (dq ? "dq" : null);
         return {
           id: player.id,
-          i: index,
-          ok: (finish || progress).ok || 0,
-          err: (finish || progress).err || 0,
-          finishedAt: finish?.at || null,
-          wpm: now < this.state.startAt ? 0 : wpm(index, Math.max(1, elapsed)),
+          finished: Boolean(this.state.finishes[player.id]) && !dq,
+          forfeit: Boolean(row.forfeit),
+          dnf: Boolean(row.dnf) || dq,
+          dnfReason,
+          forfeitWin: Boolean(row.forfeitWin),
+          lastActivity: row.lastActivity ?? null,
+          connected: connectedNow,
+          disconnectedAt,
         };
       }),
+    };
+  }
+
+  storeDecision(players) {
+    const presence = {};
+    for (const player of players) {
+      const idleOrDrop = player.dnfReason === "idle" || player.dnfReason === "disconnect";
+      presence[player.id] = {
+        lastActivity: player.lastActivity ?? null,
+        disconnectedAt: player.connected ? null : (player.disconnectedAt ?? null),
+        forfeit: Boolean(player.forfeit),
+        forfeitWin: Boolean(player.forfeitWin) && !player.forfeit,
+        dnf: idleOrDrop,
+        dnfReason: idleOrDrop ? player.dnfReason : null,
+      };
+    }
+    this.state.presence = presence;
+  }
+
+  currentEnd(now = Date.now()) {
+    return raceStanding(this.decisionState(now).players);
+  }
+
+  playerViews() {
+    const now = Date.now();
+    const connected = this.connectedIds();
+    return this.state.players.map((player) => {
+      const finish = this.state.finishes[player.id];
+      const progress = this.state.progress[player.id] || { i: 0, ok: 0, err: 0 };
+      const presence = this.state.presence?.[player.id] || {};
+      const dq = Boolean(progress.dq);
+      const finished = Boolean(finish) && !dq;
+      let status = "racing";
+      if (finished) status = "finished";
+      else if (presence.forfeit) status = "forfeit";
+      else if (presence.dnfReason === "idle") status = "timeout";
+      else if (presence.dnfReason === "disconnect" || dq) status = "disconnect";
+      else if (!connected.has(player.id) && (presence.disconnectedAt != null || now >= this.state.startAt)) status = "away";
+      const index = finished ? this.state.sentence.length : progress.i || 0;
+      const end = finish?.at || now;
+      const elapsed = Math.max(0, Math.min(end, now) - this.state.startAt);
+      return {
+        id: player.id,
+        i: index,
+        ok: (finished ? finish : progress).ok || 0,
+        err: (finished ? finish : progress).err || 0,
+        finishedAt: finished ? finish.at : null,
+        wpm: now < this.state.startAt ? 0 : wpm(index, Math.max(1, elapsed)),
+        status,
+      };
+    });
+  }
+
+  snapshot() {
+    return {
+      t: "state",
+      serverNow: Date.now(),
+      startAt: this.state.startAt,
+      players: this.playerViews(),
     };
   }
 
@@ -127,9 +192,10 @@ export class Race {
       finishes: {},
       results: null,
       saved: false,
+      presence: {},
     };
     await this.persist();
-    await this.ctx.storage.setAlarm(startAt + limitMs);
+    await this.arm();
     return json({ ok: true });
   }
 
@@ -147,6 +213,7 @@ export class Race {
       progress: viewProgress(this.state.progress),
       finishes: this.state.finishes,
       results: this.state.results,
+      racers: this.playerViews(),
     };
   }
 
@@ -170,22 +237,20 @@ export class Race {
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ id });
+    const now = Date.now();
+    const decision = this.decisionState(now);
+    const outcome = applyRaceEvent(decision, { type: "reconnect", playerId: id }, now);
+    if (outcome.ok) this.storeDecision(outcome.players);
+    await this.persist();
     server.send(JSON.stringify(this.hello()));
     this.broadcast(this.snapshot());
+    await this.settle(outcome.end);
+    if (!this.state.results) await this.arm();
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws, raw) {
-    if (!this.state || this.state.results) {
-      if (this.state?.results) {
-        try {
-          ws.send(JSON.stringify({ t: "results", ...this.state.results }));
-        } catch {
-          // Closed.
-        }
-      }
-      return;
-    }
+    if (!this.state) return;
     const att = ws.deserializeAttachment();
     if (!att?.id) return;
     let text = raw;
@@ -198,6 +263,14 @@ export class Race {
     try {
       msg = JSON.parse(text);
     } catch {
+      return;
+    }
+    if (msg?.t === "leave") {
+      await this.leave(att.id, ws);
+      return;
+    }
+    if (this.state.results) {
+      this.send(ws, { t: "results", ...this.state.results });
       return;
     }
     if (!msg || (msg.t !== "prog" && msg.t !== "fin")) return;
@@ -246,12 +319,15 @@ export class Race {
     progress.total = (progress.total || 0) + 1;
     progress.recent = recent.concat(now);
     this.state.progress[player.id] = progress;
+    const activity = applyRaceEvent(this.decisionState(now), { type: "activity", playerId: player.id }, now);
+    if (activity.ok) this.storeDecision(activity.players);
     if (verdict.finished) {
       this.state.finishes[player.id] = { at: now, ok: progress.ok, err: progress.err };
     }
     await this.persist();
     this.broadcast(this.snapshot());
     await this.maybeFinish();
+    await this.arm();
   }
 
   noteReject(playerId, reason, disqualify) {
@@ -272,8 +348,38 @@ export class Race {
     }
   }
 
-  async webSocketClose() {
-    await this.maybeFinish();
+  async webSocketClose(ws) {
+    if (!this.state || this.state.results) return;
+    const att = ws?.deserializeAttachment?.();
+    if (!att?.id) return;
+    if (this.connectedIds().has(att.id)) return;
+    const now = Date.now();
+    const decision = this.decisionState(now);
+    const outcome = applyRaceEvent(decision, { type: "disconnect", playerId: att.id }, now);
+    if (!outcome.ok || outcome.players === decision.players) return;
+    this.storeDecision(outcome.players);
+    await this.persist();
+    this.broadcast(this.snapshot());
+    await this.arm();
+  }
+
+  async leave(playerId, ws) {
+    if (!this.state || this.state.saved) return;
+    if (!this.state.players.some((player) => player.id === playerId)) return;
+    const now = Date.now();
+    const decision = this.decisionState(now);
+    const outcome = applyRaceEvent(decision, { type: "forfeit", playerId }, now);
+    this.send(ws, { t: "left", ranked: Boolean(this.state.ranked) });
+    if (!outcome.ok) return;
+    this.storeDecision(outcome.players);
+    const end = raceStanding(outcome.players);
+    if (end === "cancel") this.state.results = null;
+    await this.persist();
+    this.broadcast(this.snapshot());
+    if (this.state.saved) return;
+    // Seal on the alarm so a second forfeit can land before saveRace runs.
+    if (end) await this.ctx.storage.setAlarm(Date.now());
+    else await this.arm();
   }
 
   async cancel() {
@@ -292,21 +398,30 @@ export class Race {
     } catch {
       // Alarm already gone.
     }
+    this.broadcast({ t: "results", ...this.state.results });
   }
 
   async maybeFinish() {
     if (!this.state || this.state.results) return;
-    const connected = this.connectedIds();
-    const pending = this.state.players.filter((player) => {
-      if (this.state.finishes[player.id] || this.state.progress[player.id]?.dq) return false;
-      return connected.has(player.id);
-    });
-    if (pending.length > 0) return;
-    if (Object.keys(this.state.finishes).length === 0) {
-      if (connected.size === 0) await this.cancel();
-      return;
+    await this.settle(this.currentEnd());
+  }
+
+  async settle(end) {
+    if (!this.state || this.state.results) return;
+    if (end === "cancel") await this.cancel();
+    else if (end === "results") await this.finalize();
+  }
+
+  async arm() {
+    if (!this.state || this.state.results) return;
+    const now = Date.now();
+    const when = nextAlarmAt(this.decisionState(now), now);
+    const fireAt = when <= now ? now + 250 : when;
+    try {
+      await this.ctx.storage.setAlarm(fireAt);
+    } catch {
+      // The next accepted event arms again.
     }
-    await this.finalize();
   }
 
   async webSocketError(_ws, error) {
@@ -315,16 +430,35 @@ export class Race {
 
   async alarm() {
     if (!this.state) return;
-    if (!this.state.results) {
-      const nobodyFinished = Object.keys(this.state.finishes).length === 0;
-      if (nobodyFinished && this.connectedIds().size === 0) {
+    if (this.state.results) {
+      if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
+      return;
+    }
+    const now = Date.now();
+    const limitAt = this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS);
+    if (now >= limitAt) {
+      const standing = this.currentEnd(now);
+      if (standing === "cancel" || (Object.keys(this.state.finishes).length === 0 && this.connectedIds().size === 0 && standing !== "results")) {
         await this.cancel();
         return;
       }
       await this.finalize();
       return;
     }
-    if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
+    const decision = this.decisionState(now);
+    const outcome = applyRaceEvent(decision, { type: "tick" }, now);
+    if (outcome.ok) this.storeDecision(outcome.players);
+    await this.persist();
+    if (outcome.notices.length) this.broadcast(this.snapshot());
+    if (outcome.end === "cancel") {
+      await this.cancel();
+      return;
+    }
+    if (outcome.end === "results") {
+      await this.finalize();
+      return;
+    }
+    await this.arm();
   }
 
   async finalize() {
@@ -340,6 +474,11 @@ export class Race {
 
   async writeResults() {
     if (!this.state?.results || this.state.results.cancelled || this.state.saved) return;
+    if (this.currentEnd() === "cancel") {
+      this.state.results = null;
+      await this.cancel();
+      return;
+    }
     try {
       await saveRace(this.env, {
         id: this.state.raceId,

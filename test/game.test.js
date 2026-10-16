@@ -3,7 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { applyElo, eloDeltas } from "../src/elo.js";
 import { MODE_COLUMNS } from "../src/modes.js";
-import { buildResults } from "../src/results.js";
+import { applyRaceEvent, IDLE_MS, nextAlarmAt, RECONNECT_GRACE_MS, resultsHeadline } from "../src/race-end.js";
+import { buildResults, countsAsWin } from "../src/results.js";
 import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
 import { LENGTHS, lengthList } from "../src/lengths.js";
@@ -362,6 +363,187 @@ test("a disqualified player does not take the win or the elo change", () => {
   assert.equal(bea.ms, null);
   assert.equal(bea.eloAfter, 1000);
   assert.notEqual(bea.place, 1);
+});
+
+function racer(id, extra = {}) {
+  return {
+    id,
+    finished: false,
+    forfeit: false,
+    dnf: false,
+    dnfReason: null,
+    forfeitWin: false,
+    lastActivity: null,
+    connected: true,
+    disconnectedAt: null,
+    ...extra,
+  };
+}
+
+function race(players, extra = {}) {
+  return { startAt: 1_000_000, limitMs: 120000, ranked: true, players, ...extra };
+}
+
+function resultState(players, ranked = true) {
+  const presence = {};
+  for (const player of players) {
+    presence[player.id] = {
+      forfeit: player.forfeit,
+      forfeitWin: player.forfeitWin,
+      dnf: player.dnf,
+      dnfReason: player.dnfReason,
+    };
+  }
+  return {
+    ranked,
+    mode: "desktop",
+    sentence: "I love Fluxer",
+    startAt: 1_000_000,
+    players: players.map((player) => ({
+      id: player.id,
+      name: player.id === "a" ? "Ada" : "Bea",
+      tag: player.id,
+      eloAtStart: 1000,
+    })),
+    finishes: {},
+    progress: {},
+    presence,
+  };
+}
+
+test("a ranked forfeit is a loss and the opponent wins immediately", () => {
+  const start = race([racer("a"), racer("b")]);
+  const left = applyRaceEvent(start, { type: "forfeit", playerId: "a" }, start.startAt + 1000);
+  assert.equal(left.ok, true);
+  assert.equal(left.end, "results");
+  assert.equal(left.players.find((player) => player.id === "a").forfeit, true);
+  assert.equal(left.players.find((player) => player.id === "b").forfeitWin, true);
+  const results = buildResults(resultState(left.players, true), start.startAt + 1000);
+  const winner = results.rows.find((row) => row.id === "b");
+  const leaver = results.rows.find((row) => row.id === "a");
+  assert.equal(winner.place, 1);
+  assert.equal(winner.outcome, "forfeit-win");
+  assert.equal(winner.ms, null);
+  assert.equal(winner.eloAfter, 1016);
+  assert.equal(countsAsWin(winner), true);
+  assert.equal(leaver.place, 2);
+  assert.equal(leaver.outcome, "forfeit");
+  assert.equal(leaver.ms, null);
+  assert.equal(leaver.eloAfter, 984);
+  assert.equal(countsAsWin(leaver), false);
+  assert.equal(resultsHeadline(results.rows, "b", false).title, "Opponent forfeited, you win");
+  assert.equal(resultsHeadline(results.rows, "a", false).title, "You forfeited");
+});
+
+test("practice forfeits do not change elo", () => {
+  const solo = applyRaceEvent(race([racer("a")], { ranked: false }), { type: "forfeit", playerId: "a" }, 1_000_000);
+  assert.equal(solo.end, "cancel");
+  assert.equal(solo.players[0].forfeitWin, false);
+
+  const duel = applyRaceEvent(race([racer("a"), racer("b")], { ranked: false }), { type: "forfeit", playerId: "a" }, 1_000_000);
+  assert.equal(duel.end, "results");
+  const results = buildResults(resultState(duel.players, false), 1_000_000);
+  assert.equal(results.ranked, false);
+  assert.ok(results.rows.every((row) => row.eloAfter == null));
+  assert.equal(results.rows.find((row) => row.id === "b").outcome, "forfeit-win");
+});
+
+test("a second forfeit cancels the race with no winner", () => {
+  const start = race([racer("a"), racer("b")]);
+  const first = applyRaceEvent(start, { type: "forfeit", playerId: "a" }, start.startAt);
+  const second = applyRaceEvent({ ...start, players: first.players }, { type: "forfeit", playerId: "b" }, start.startAt + 10);
+  assert.equal(second.end, "cancel");
+  assert.ok(second.players.every((player) => player.forfeit));
+  assert.ok(second.players.every((player) => player.forfeitWin === false));
+  assert.equal(resultsHeadline([], "a", true).title, "Room closed");
+});
+
+test("a repeated forfeit and a stranger's forfeit do not change the race", () => {
+  const start = race([racer("a"), racer("b")]);
+  const first = applyRaceEvent(start, { type: "forfeit", playerId: "a" }, start.startAt);
+  const again = applyRaceEvent({ ...start, players: first.players }, { type: "forfeit", playerId: "a" }, start.startAt + 5);
+  assert.equal(again.ok, false);
+  assert.equal(again.reason, "repeated");
+  assert.equal(again.players, first.players);
+  const stranger = applyRaceEvent(start, { type: "forfeit", playerId: "nope" }, start.startAt);
+  assert.equal(stranger.ok, false);
+  assert.equal(stranger.reason, "not-participant");
+  assert.equal(stranger.players, start.players);
+});
+
+test("idle players are DNF only after the deadline", () => {
+  const start = race([racer("a"), racer("b")]);
+  const before = applyRaceEvent(start, { type: "tick" }, start.startAt - 1);
+  assert.equal(before.end, null);
+  assert.ok(before.players.every((player) => player.dnf === false));
+
+  const active = applyRaceEvent(start, { type: "activity", playerId: "a" }, start.startAt + 1000);
+  assert.equal(active.players.find((player) => player.id === "a").lastActivity, start.startAt + 1000);
+  const early = applyRaceEvent(start, { type: "activity", playerId: "a" }, start.startAt - 1);
+  assert.equal(early.players, start.players);
+
+  const one = applyRaceEvent({ ...start, players: active.players }, { type: "tick" }, start.startAt + IDLE_MS);
+  assert.equal(one.end, null);
+  assert.equal(one.players.find((player) => player.id === "b").dnfReason, "idle");
+  assert.equal(one.players.find((player) => player.id === "a").dnf, false);
+  assert.equal(one.notices.some((notice) => notice.playerId === "b" && notice.kind === "timeout"), true);
+
+  const both = applyRaceEvent(start, { type: "tick" }, start.startAt + IDLE_MS);
+  assert.equal(both.end, "results");
+  assert.ok(both.players.every((player) => player.dnfReason === "idle"));
+  const results = buildResults(resultState(both.players, true), start.startAt + IDLE_MS);
+  assert.ok(results.rows.every((row) => row.outcome === "timeout" && row.ms == null));
+  assert.ok(results.rows.every((row) => countsAsWin(row) === false));
+  assert.equal(resultsHeadline(results.rows, "a", false).title, "Timed out");
+});
+
+test("a disconnect can resume inside the grace period and is DNF after it", () => {
+  const start = race([racer("a"), racer("b")]);
+  const dropped = applyRaceEvent(start, { type: "disconnect", playerId: "a" }, start.startAt + 5000);
+  assert.equal(dropped.end, null);
+  assert.equal(dropped.players.find((player) => player.id === "a").disconnectedAt, start.startAt + 5000);
+  const again = applyRaceEvent({ ...start, players: dropped.players }, { type: "disconnect", playerId: "a" }, start.startAt + 9000);
+  assert.equal(again.players.find((player) => player.id === "a").disconnectedAt, start.startAt + 5000);
+
+  const back = applyRaceEvent(
+    { ...start, players: dropped.players },
+    { type: "reconnect", playerId: "a" },
+    start.startAt + 5000 + RECONNECT_GRACE_MS - 1,
+  );
+  assert.equal(back.resumed, true);
+  assert.equal(back.players.find((player) => player.id === "a").dnf, false);
+  assert.equal(back.players.find((player) => player.id === "a").disconnectedAt, null);
+
+  const late = applyRaceEvent(
+    { ...start, players: dropped.players },
+    { type: "reconnect", playerId: "a" },
+    start.startAt + 5000 + RECONNECT_GRACE_MS,
+  );
+  assert.equal(late.resumed, false);
+  assert.equal(late.players.find((player) => player.id === "a").dnfReason, "disconnect");
+  assert.equal(late.end, null);
+
+  const waiting = applyRaceEvent({ ...start, players: dropped.players }, { type: "tick" }, start.startAt + 5000 + 10_000);
+  assert.equal(waiting.players.find((player) => player.id === "a").dnf, false);
+
+  let players = dropped.players;
+  players = applyRaceEvent({ ...start, players }, { type: "disconnect", playerId: "b" }, start.startAt + 5000).players;
+  const abandoned = applyRaceEvent({ ...start, players }, { type: "tick" }, start.startAt + 5000 + RECONNECT_GRACE_MS);
+  assert.equal(abandoned.end, "cancel");
+  assert.ok(abandoned.players.every((player) => player.dnfReason === "disconnect"));
+});
+
+test("the next alarm is the soonest idle, grace, or start deadline", () => {
+  const start = race([racer("a"), racer("b")]);
+  assert.equal(nextAlarmAt(start, start.startAt - 500), start.startAt);
+  const active = applyRaceEvent(start, { type: "activity", playerId: "a" }, start.startAt + 1000);
+  const moved = { ...start, players: active.players };
+  assert.equal(nextAlarmAt(moved, start.startAt + 1000), start.startAt + IDLE_MS);
+  const dropped = applyRaceEvent(moved, { type: "disconnect", playerId: "b" }, start.startAt + 1000);
+  assert.equal(
+    nextAlarmAt({ ...start, players: dropped.players }, start.startAt + 1000),
+    start.startAt + 1000 + RECONNECT_GRACE_MS,
+  );
 });
 
 function extractFunction(src, name) {

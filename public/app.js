@@ -77,6 +77,8 @@ const state = {
   roomMax: 6,
   shift: false,
   shell: "",
+  forfeitConfirm: false,
+  forfeitedLocally: false,
 };
 
 let lobby = null;
@@ -85,6 +87,7 @@ let raceTries = 0;
 let toastTimer = null;
 let holdDelay = null;
 let holdRepeat = null;
+let leaveTimer = null;
 
 function h(tag, props, kids) {
   const node = document.createElement(tag);
@@ -485,6 +488,13 @@ function raceView() {
   const raceLength = lengthInfo(state.length)?.title || "Sprint";
   top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${state.ranked ? "rated" : "practice"}` }));
   top.append(h("span", { class: "stats", id: "stats", text: "" }));
+  top.append(h("button", {
+    id: "leave-race",
+    class: "btn ghost",
+    type: "button",
+    text: "Leave race",
+    onclick: requestLeave,
+  }));
   box.append(top);
   const wrap = h("div", { class: "passage-wrap" });
   wrap.append(h("div", { class: "count", id: "count", hidden: true }));
@@ -508,6 +518,23 @@ function raceView() {
   box.append(h("p", { class: "hint", text: hint }));
   if (state.mode === "cursor") box.append(keyboard());
   box.append(h("p", { class: "locked", id: "locked", hidden: true, text: "Locked in. Waiting for the rest of the room." }));
+  box.append(h("p", { class: "hint", id: "race-note", hidden: true }));
+  const confirm = h("div", {
+    id: "forfeit",
+    class: "forfeit",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-labelledby": "forfeit-title",
+    hidden: true,
+  });
+  confirm.append(h("p", { id: "forfeit-title", text: "Forfeit this ranked race? You'll lose rating." }));
+  const confirmActions = h("div", { class: "actions" });
+  confirmActions.append(
+    h("button", { id: "forfeit-keep", class: "btn", type: "button", text: "Keep racing", onclick: closeForfeit }),
+    h("button", { id: "forfeit-yes", class: "btn primary", type: "button", text: "Forfeit", onclick: confirmForfeit }),
+  );
+  confirm.append(confirmActions);
+  box.append(confirm);
   capture.addEventListener("keydown", (event) => {
     if (state.mode !== "mobile") return;
     if (event.key === "Backspace") {
@@ -577,6 +604,7 @@ function keyButton(key, label, extra) {
 }
 
 function pressKey(key) {
+  if (state.forfeitConfirm || racedOut()) return;
   if (key === "shift") {
     state.shift = !state.shift;
     paintShift();
@@ -604,13 +632,29 @@ function paintShift() {
   document.querySelector('[data-key="shift"]')?.classList.toggle("on", state.shift);
 }
 
+function resultsCopy() {
+  if (state.results?.cancelled) return { title: "Room closed", detail: "Everyone left before a finish." };
+  const rows = state.results?.rows || [];
+  const me = rows.find((row) => row.id === state.me?.id);
+  const others = rows.filter((row) => row.id !== state.me?.id);
+  if (!me) return { title: "Finish order", detail: "" };
+  if (me.outcome === "forfeit") return { title: "You forfeited", detail: "This race counts as a loss." };
+  if (me.outcome === "timeout" || me.outcome === "disconnect") return { title: "Timed out", detail: "The race moved on without you." };
+  if (others.some((row) => row.outcome === "forfeit") && (me.outcome === "forfeit-win" || me.place === 1)) {
+    return { title: "Opponent forfeited, you win", detail: "You take the win." };
+  }
+  if (me.place === 1 && others.some((row) => row.outcome === "timeout" || row.outcome === "disconnect")) {
+    return { title: "You win", detail: "Your opponent timed out." };
+  }
+  return { title: "Finish order", detail: "" };
+}
+
 function resultsView() {
   const box = h("div", { class: "results" });
-  if (state.results?.cancelled) {
-    box.append(h("h1", { class: "lead", text: "Room closed" }));
-    box.append(h("p", { class: "muted", text: "Everyone left before a finish." }));
-  } else {
-    box.append(h("h1", { class: "lead", text: "Finish order" }));
+  const copy = resultsCopy();
+  box.append(h("h1", { class: "lead", text: copy.title }));
+  if (copy.detail) box.append(h("p", { class: "muted", text: copy.detail }));
+  if (!state.results?.cancelled) {
     box.append(h("p", { class: "quote", text: state.results?.sentence || state.sentence }));
     box.append(resultTable());
   }
@@ -694,7 +738,7 @@ function resultTable() {
   const body = h("tbody", {});
   for (const row of state.results?.rows || []) {
     const tr = h("tr", { class: row.id === state.me?.id ? "me" : "" });
-    tr.append(h("td", { text: row.finished ? String(row.place) : "DNF" }));
+    tr.append(h("td", { text: placeLabel(row) }));
     tr.append(h("td", { text: row.name }));
     tr.append(h("td", { text: Number(row.wpm).toFixed(1) }));
     tr.append(h("td", { text: `${row.accuracy}%` }));
@@ -706,6 +750,13 @@ function resultTable() {
   }
   table.append(body);
   return table;
+}
+
+function placeLabel(row) {
+  if (row.outcome === "forfeit-win" || row.finished) return String(row.place);
+  if (row.outcome === "forfeit") return "Forfeit";
+  if (row.outcome === "timeout" || row.outcome === "disconnect") return "Time";
+  return "DNF";
 }
 
 function formatDelta(value) {
@@ -745,6 +796,7 @@ function paintDynamic() {
     paintPassage();
     paintStats();
     paintLocked();
+    paintRaceNote();
   }
 }
 
@@ -792,7 +844,39 @@ function paintLocked() {
   node.hidden = state.phase !== "finishing";
 }
 
+function paintRaceNote() {
+  const note = document.getElementById("race-note");
+  if (!note) return;
+  const mine = myLive();
+  const others = state.live.filter((row) => row.id !== state.me?.id);
+  let text = "";
+  if (mine?.status === "timeout" || mine?.status === "disconnect") text = "You timed out.";
+  else if (others.some((row) => row.status === "forfeit" || row.status === "disconnect")) text = "Opponent left.";
+  else if (others.some((row) => row.status === "timeout")) text = "Opponent timed out.";
+  else if (others.some((row) => row.status === "away")) text = "Opponent reconnecting.";
+  note.hidden = !text;
+  note.textContent = text;
+}
+
+function paceLabel(row) {
+  if (row.status === "forfeit" || row.status === "disconnect") return "left";
+  if (row.status === "timeout") return "idle";
+  if (row.status === "away") return "away";
+  if (row.finishedAt) return "fin";
+  return `${Number(row.wpm || 0).toFixed(0)}`;
+}
+
+function myLive() {
+  return state.live.find((row) => row.id === state.me?.id) || null;
+}
+
+function racedOut() {
+  const status = myLive()?.status;
+  return status === "timeout" || status === "disconnect" || status === "forfeit";
+}
+
 function typeChar(ch) {
+  if (state.forfeitConfirm || racedOut()) return;
   if (state.phase === "countdown") {
     toast("Wait for the start.");
     return;
@@ -817,6 +901,7 @@ function typeChar(ch) {
 }
 
 function backspace() {
+  if (state.forfeitConfirm || racedOut()) return;
   if (state.phase !== "race" || !state.typed) return;
   state.typed = state.typed.slice(0, -1);
   publish("prog");
@@ -943,7 +1028,7 @@ function paintLanes() {
     applyLaneWidth(fill, row.i || 0, total);
     track.append(fill);
     lane.append(track);
-    lane.append(h("span", { class: "pace", text: row.finishedAt ? "fin" : `${Number(row.wpm || 0).toFixed(0)}` }));
+    lane.append(h("span", { class: "pace", text: paceLabel(row) }));
     root.append(lane);
   }
 }
@@ -1044,6 +1129,8 @@ function startMatch(msg) {
   state.live = (msg.players || []).map((player) => ({ id: player.id, i: 0, wpm: 0, finishedAt: null }));
   state.results = null;
   state.rematch = null;
+  state.forfeitConfirm = false;
+  state.forfeitedLocally = false;
   state.phase = serverNow() < state.startAt ? "countdown" : "race";
   state.shell = "";
   sessionStorage.setItem("tg_race", msg.raceId);
@@ -1066,6 +1153,7 @@ function openRace(raceId) {
       absorbHello(msg);
     } else if (msg.t === "state") absorbState(msg);
     else if (msg.t === "results") absorbResults(msg);
+    else if (msg.t === "left") finishLocalLeave(mine);
     else if (msg.t === "wait") {
       toast("Wait for the start.");
       applyServerText(msg);
@@ -1073,6 +1161,7 @@ function openRace(raceId) {
   });
   mine.addEventListener("close", () => {
     if (mine !== raceSocket) return;
+    if (state.forfeitedLocally) return;
     if (state.phase !== "race" && state.phase !== "countdown" && state.phase !== "finishing") return;
     raceTries += 1;
     if (raceTries > 3) {
@@ -1100,7 +1189,7 @@ function absorbHello(msg) {
     absorbResults(msg.results.t ? msg.results : { t: "results", ...msg.results });
     return;
   }
-  state.live = (msg.players || []).map((player) => {
+  state.live = Array.isArray(msg.racers) ? msg.racers : (msg.players || []).map((player) => {
     const finish = msg.finishes?.[player.id];
     const progress = msg.progress?.[player.id] || {};
     return {
@@ -1112,7 +1201,7 @@ function absorbHello(msg) {
       finishedAt: finish?.at || null,
     };
   });
-  const mine = state.live.find((row) => row.id === state.me?.id);
+  const mine = myLive();
   if (mine && state.typed.length < mine.i) {
     state.typed = msg.sentence.slice(0, mine.i);
     state.ok = mine.ok;
@@ -1124,30 +1213,145 @@ function absorbHello(msg) {
 }
 
 function absorbState(msg) {
+  if (state.forfeitedLocally) return;
   if (msg.serverNow) state.offset = msg.serverNow - Date.now();
   state.live = msg.players || [];
-  const mine = state.live.find((row) => row.id === state.me?.id);
+  const mine = myLive();
   if (mine?.finishedAt) state.phase = state.phase === "results" ? "results" : "finishing";
   if (state.shell === "race") {
     paintLocked();
     paintLanes();
+    paintRaceNote();
   }
 }
 
 function absorbResults(msg) {
+  if (state.forfeitedLocally) return;
   state.results = msg;
+  for (const row of msg.rows || []) {
+    const live = state.live.find((entry) => entry.id === row.id);
+    if (!live) continue;
+    if (row.outcome === "forfeit") live.status = "forfeit";
+    else if (row.outcome === "timeout") live.status = "timeout";
+    else if (row.outcome === "disconnect") live.status = "disconnect";
+    else if (row.outcome === "forfeit-win" || row.finished) live.status = "finished";
+  }
   state.phase = "results";
+  state.forfeitConfirm = false;
   ensure();
   loadMeta().then(() => renderSide());
 }
 
-function releaseRaceSocket() {
+function clearResume() {
   sessionStorage.removeItem("tg_race");
-  if (raceSocket) raceSocket.close();
-  raceSocket = null;
   const url = new URL(location.href);
   url.searchParams.delete("room");
   history.replaceState({}, "", url.pathname);
+}
+
+function releaseRaceSocket() {
+  clearResume();
+  if (raceSocket) raceSocket.close();
+  raceSocket = null;
+}
+
+function exitToLobby() {
+  clearResume();
+  state.raceId = null;
+  state.phase = "lobby";
+  state.results = null;
+  state.sentence = "";
+  state.typed = "";
+  state.players = [];
+  state.live = [];
+  state.room = null;
+  state.queue = null;
+  state.rematch = null;
+  state.forfeitConfirm = false;
+  ensure();
+}
+
+function requestLeave() {
+  if (racedOut()) {
+    state.forfeitedLocally = true;
+    const sock = raceSocket;
+    sendLobby({ t: "leave" });
+    exitToLobby();
+    if (sock) sock.close();
+    if (raceSocket === sock) raceSocket = null;
+    return;
+  }
+  if (state.ranked) {
+    state.forfeitConfirm = true;
+    const dialog = document.getElementById("forfeit");
+    if (dialog) dialog.hidden = false;
+    document.getElementById("forfeit-keep")?.focus();
+    return;
+  }
+  commitLeave();
+}
+
+function closeForfeit() {
+  state.forfeitConfirm = false;
+  const dialog = document.getElementById("forfeit");
+  if (dialog) dialog.hidden = true;
+  document.getElementById("leave-race")?.focus();
+}
+
+function confirmForfeit() {
+  commitLeave();
+}
+
+function sendLeave() {
+  const payload = JSON.stringify({ t: "leave" });
+  const sock = raceSocket;
+  if (!sock) return false;
+  if (sock.readyState === WebSocket.OPEN) {
+    sock.send(payload);
+    return true;
+  }
+  if (sock.readyState === WebSocket.CONNECTING) {
+    sock.addEventListener("open", () => {
+      if (state.forfeitedLocally && sock.readyState === WebSocket.OPEN) sock.send(payload);
+    }, { once: true });
+    return true;
+  }
+  return false;
+}
+
+function armLeaveClose() {
+  clearTimeout(leaveTimer);
+  const sock = raceSocket;
+  leaveTimer = setTimeout(() => {
+    if (sock && raceSocket === sock) {
+      sock.close();
+      raceSocket = null;
+    }
+  }, 3000);
+}
+
+function finishLocalLeave(sock) {
+  clearTimeout(leaveTimer);
+  state.forfeitedLocally = true;
+  clearResume();
+  if (sock === raceSocket) raceSocket = null;
+  try {
+    sock.close();
+  } catch {
+    // Already closed.
+  }
+  if (state.phase !== "lobby") exitToLobby();
+}
+
+function commitLeave() {
+  const ranked = Boolean(state.ranked);
+  state.forfeitConfirm = false;
+  state.forfeitedLocally = true;
+  sendLeave();
+  sendLobby({ t: "leave" });
+  exitToLobby();
+  toast(ranked ? "You forfeited." : "You left the race.");
+  armLeaveClose();
 }
 
 function practiceAgain() {
@@ -1175,6 +1379,8 @@ function queueAgain() {
 }
 
 function leaveRace() {
+  state.forfeitedLocally = false;
+  state.forfeitConfirm = false;
   releaseRaceSocket();
   state.phase = "lobby";
   state.results = null;
@@ -1218,6 +1424,7 @@ async function loadMeta() {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (state.forfeitConfirm || racedOut()) return;
   if (state.mode === "cursor") {
     if ((state.phase === "race" || state.phase === "countdown") && (event.key.length === 1 || event.key === "Backspace" || event.key === " ")) {
       event.preventDefault();

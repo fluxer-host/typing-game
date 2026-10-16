@@ -1,4 +1,5 @@
 import { MODE_COLUMNS, isMode } from "./modes.js";
+import { countsAsWin } from "./results.js";
 
 function columns(mode) {
   if (!isMode(mode)) throw new Error("bad mode");
@@ -124,7 +125,7 @@ export async function saveRace(env, race) {
       ),
     );
     if (race.ranked) {
-      const won = row.place === 1 && row.ms != null ? 1 : 0;
+      const won = countsAsWin(row) ? 1 : 0;
       const finished = row.ms != null ? 1 : 0;
       statements.push(
         env.DB.prepare(
