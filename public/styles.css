@@ -69,8 +69,11 @@ button { cursor: pointer; }
   place-items: center;
   font-size: 0.85rem;
   font-weight: 700;
-  background: var(--flux);
 }
+
+.avatar { background: transparent; }
+
+.initial { background: var(--flux); }
 
 .tag { color: var(--muted); font-size: 0.85rem; }
 
