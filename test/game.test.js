@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { applyElo, eloDeltas } from "../src/elo.js";
 import { MODE_COLUMNS } from "../src/modes.js";
@@ -143,6 +143,83 @@ test("a solo practice race does not write elo", () => {
   );
   assert.equal(results.rows[0].eloAfter, null);
   assert.equal(results.rows[0].finished, true);
+});
+
+function extractFunction(src, name) {
+  const start = src.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, name);
+  let depth = 0;
+  let seen = false;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === "{") {
+      depth += 1;
+      seen = true;
+    } else if (src[i] === "}") {
+      depth -= 1;
+      if (seen && depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unclosed ${name}`);
+}
+
+function loadStyleHelpers() {
+  const src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const names = ["cssColor", "safeHex", "lanePercent", "applyLaneWidth", "applyAvatarColor"];
+  const body = names.map((name) => extractFunction(src, name)).join("\n");
+  return new Function(`${body}\nreturn { cssColor, safeHex, lanePercent, applyLaneWidth, applyAvatarColor };`)();
+}
+
+test("lane width and avatar colour stay inside the CSSOM", () => {
+  const { cssColor, safeHex, lanePercent, applyLaneWidth, applyAvatarColor } = loadStyleHelpers();
+  assert.equal(lanePercent(0, 40), 0);
+  assert.equal(lanePercent(1, 3), 33);
+  assert.equal(lanePercent(2, 3), 67);
+  assert.equal(lanePercent(4, 3), 100);
+  assert.equal(lanePercent(-4, 10), 0);
+  assert.equal(lanePercent(5, 0), 0);
+  assert.equal(lanePercent(Number.NaN, 8), 0);
+  assert.equal(lanePercent(1, Number.POSITIVE_INFINITY), 0);
+  assert.equal(cssColor(0xff0000), "#ff0000");
+  assert.equal(cssColor(0x000000), "#4641d9");
+  assert.equal(cssColor("nope"), "#4641d9");
+  assert.equal(safeHex("#3dd68c"), "#3dd68c");
+  assert.equal(safeHex("#fff"), null);
+  assert.equal(safeHex("#3dd68c;width:100%"), null);
+  assert.equal(safeHex("red"), null);
+  assert.equal(safeHex("rgb(61, 214, 140)"), null);
+
+  const fill = { style: {}, attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } };
+  applyLaneWidth(fill, 1, 2);
+  assert.equal(fill.style.width, "50%");
+  applyLaneWidth(fill, 9, 2);
+  assert.equal(fill.style.width, "100%");
+  assert.equal(fill.attrs.style, undefined);
+
+  const chip = { style: {} };
+  applyAvatarColor(chip, 0x3dd68c);
+  assert.equal(chip.style.backgroundColor, "#3dd68c");
+  const fallback = { style: {} };
+  applyAvatarColor(fallback, null);
+  assert.equal(fallback.style.backgroundColor, "#4641d9");
+});
+
+test("the front end does not use CSP-blocked inline styles", () => {
+  const root = new URL("../public/", import.meta.url);
+  const blocked = [
+    /setAttribute\s*\(\s*['"]style['"]/i,
+    /style\s*=\s*["'`]/,
+    /\.cssText\s*=/,
+    /<style\b/i,
+    /(?:^|[{,])\s*style\s*:/m,
+  ];
+  const files = readdirSync(root).filter((name) => /\.(js|html|svg)$/.test(name));
+  assert.ok(files.includes("app.js"));
+  for (const name of files) {
+    const src = readFileSync(new URL(name, root), "utf8");
+    for (const pattern of blocked) {
+      assert.equal(pattern.test(src), false, `${name} matches ${pattern}`);
+    }
+  }
 });
 
 test("session tokens are signed and expire", async () => {

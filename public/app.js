@@ -93,6 +93,8 @@ function h(tag, props, kids) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
     else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2).toLowerCase(), value);
+    // style-src 'self' blocks a style attribute. Set node.style.* after create.
+    else if (key.toLowerCase() === "style") continue;
     else node.setAttribute(key, value === true ? "" : String(value));
   }
   for (const kid of kids || []) node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
@@ -162,6 +164,27 @@ function cssColor(value) {
   return `#${hex}`;
 }
 
+function safeHex(value) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/.test(value) ? value : null;
+}
+
+function lanePercent(progress, total) {
+  const done = Number(progress);
+  const length = Number(total);
+  if (!Number.isFinite(done) || !Number.isFinite(length) || length <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((done / length) * 100)));
+}
+
+function applyLaneWidth(node, progress, total) {
+  node.style.width = `${lanePercent(progress, total)}%`;
+}
+
+function applyAvatarColor(node, color) {
+  const hex = safeHex(cssColor(color));
+  if (!hex) return;
+  node.style.backgroundColor = hex;
+}
+
 function avatarNode(player, className) {
   if (player.avatar) {
     const img = h("img", { class: className || "avatar", alt: "", src: player.avatar });
@@ -172,11 +195,12 @@ function avatarNode(player, className) {
 }
 
 function initialNode(player, className) {
-  return h("span", {
+  const node = h("span", {
     class: className || "initial",
     text: (player.name || "?").slice(0, 1).toUpperCase(),
-    style: `background:${cssColor(player.color)}`,
   });
+  applyAvatarColor(node, player.color);
+  return node;
 }
 
 function lengthInfo(id) {
@@ -904,7 +928,9 @@ function paintLanes() {
     const lane = h("div", { class: "lane" });
     lane.append(h("b", { text: row.name }));
     const track = h("div", { class: "track" });
-    track.append(h("div", { class: "fill", style: `width:${Math.round(((row.i || 0) / total) * 100)}%` }));
+    const fill = h("div", { class: "fill" });
+    applyLaneWidth(fill, row.i || 0, total);
+    track.append(fill);
     lane.append(track);
     lane.append(h("span", { class: "pace", text: row.finishedAt ? "fin" : `${Number(row.wpm || 0).toFixed(0)}` }));
     root.append(lane);
