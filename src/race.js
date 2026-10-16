@@ -3,16 +3,19 @@ import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { isMode } from "./modes.js";
+import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
 import { buildResults } from "./results.js";
 import { passageOk } from "./sentences.js";
 import { wpm } from "./score.js";
 
 const RACE_LIMIT_MS = 120000;
 
-function clamp(value, max) {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number < 0) return 0;
-  return Math.min(max, Math.floor(number));
+function viewProgress(progress) {
+  const view = {};
+  for (const [id, row] of Object.entries(progress || {})) {
+    view[id] = { i: row?.i || 0, ok: row?.ok || 0, err: row?.err || 0 };
+  }
+  return view;
 }
 
 export class Race {
@@ -141,7 +144,7 @@ export class Race {
       length: this.state.length || "sprint",
       ranked: this.state.ranked,
       players: this.state.players,
-      progress: this.state.progress,
+      progress: viewProgress(this.state.progress),
       finishes: this.state.finishes,
       results: this.state.results,
     };
@@ -187,7 +190,10 @@ export class Race {
     if (!att?.id) return;
     let text = raw;
     if (typeof text !== "string") text = new TextDecoder().decode(text);
-    if (text.length > 2000) return;
+    if (text.length > MAX_RACE_MESSAGE_CHARS) {
+      this.noteReject(att.id, "malformed", false);
+      return;
+    }
     let msg;
     try {
       msg = JSON.parse(text);
@@ -195,32 +201,75 @@ export class Race {
       return;
     }
     if (!msg || (msg.t !== "prog" && msg.t !== "fin")) return;
-    if (Date.now() + 80 < this.state.startAt) {
-      try {
-        ws.send(JSON.stringify({ t: "wait", serverNow: Date.now(), startAt: this.state.startAt }));
-      } catch {
-        // Closed.
-      }
-      return;
-    }
-    if (Date.now() > this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS)) {
+    const player = this.state.players.find((entry) => entry.id === att.id);
+    if (!player || this.state.finishes[player.id]) return;
+    const now = Date.now();
+    if (now > this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS)) {
       await this.finalize();
       return;
     }
-    const player = this.state.players.find((entry) => entry.id === att.id);
-    if (!player || this.state.finishes[player.id]) return;
-    const index = clamp(msg.i, this.state.sentence.length);
-    const progress = this.state.progress[player.id] || { i: 0, ok: 0, err: 0 };
-    progress.i = index;
-    progress.ok = clamp(msg.ok, 10000);
-    progress.err = clamp(msg.err, 10000);
+    const progress = this.state.progress[player.id] || { text: "", i: 0, ok: 0, err: 0, total: 0, recent: [] };
+    if (progress.dq) return;
+    const recent = (progress.recent || []).filter((stamp) => now - stamp < RATE_WINDOW_MS && now - stamp >= 0);
+    const verdict = validateProgress({
+      passage: this.state.sentence,
+      previous: typeof progress.text === "string" ? progress.text : "",
+      next: msg.text,
+      elapsedMs: now - this.state.startAt,
+      recentStrokes: recent.length,
+      priorStrokes: progress.total || 0,
+      kind: msg.t,
+    });
+    if (!verdict.ok) {
+      this.noteReject(player.id, verdict.reason, verdict.disqualify);
+      const sync = { text: progress.text || "", ok: progress.ok || 0, err: progress.err || 0 };
+      if (verdict.reason === "early") {
+        this.send(ws, { t: "wait", serverNow: now, startAt: this.state.startAt, ...sync });
+        return;
+      }
+      if (verdict.disqualify) {
+        progress.dq = true;
+        this.state.progress[player.id] = progress;
+        await this.persist();
+        this.send(ws, { t: "sync", ...sync });
+        this.broadcast(this.snapshot());
+        await this.maybeFinish();
+        return;
+      }
+      this.send(ws, { t: "sync", ...sync });
+      return;
+    }
+    progress.text = verdict.text;
+    progress.i = verdict.index;
+    progress.ok = (progress.ok || 0) + verdict.okDelta;
+    progress.err = (progress.err || 0) + verdict.errDelta;
+    progress.total = (progress.total || 0) + 1;
+    progress.recent = recent.concat(now);
     this.state.progress[player.id] = progress;
-    if (msg.t === "fin" && index === this.state.sentence.length) {
-      this.state.finishes[player.id] = { at: Date.now(), ok: progress.ok, err: progress.err };
+    if (verdict.finished) {
+      this.state.finishes[player.id] = { at: now, ok: progress.ok, err: progress.err };
     }
     await this.persist();
     this.broadcast(this.snapshot());
     await this.maybeFinish();
+  }
+
+  noteReject(playerId, reason, disqualify) {
+    console.log(JSON.stringify({
+      event: "race_input_rejected",
+      raceId: this.state?.raceId || null,
+      playerId,
+      reason,
+      disqualify: Boolean(disqualify),
+    }));
+  }
+
+  send(ws, payload) {
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch {
+      // Closed socket.
+    }
   }
 
   async webSocketClose() {
@@ -248,7 +297,10 @@ export class Race {
   async maybeFinish() {
     if (!this.state || this.state.results) return;
     const connected = this.connectedIds();
-    const pending = this.state.players.filter((player) => !this.state.finishes[player.id] && connected.has(player.id));
+    const pending = this.state.players.filter((player) => {
+      if (this.state.finishes[player.id] || this.state.progress[player.id]?.dq) return false;
+      return connected.has(player.id);
+    });
     if (pending.length > 0) return;
     if (Object.keys(this.state.finishes).length === 0) {
       if (connected.size === 0) await this.cancel();

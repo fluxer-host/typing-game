@@ -826,10 +826,21 @@ function backspace() {
 }
 
 function publish(kind) {
-  const index = correctLength(state.typed, state.sentence);
   if (raceSocket?.readyState === WebSocket.OPEN) {
-    raceSocket.send(JSON.stringify({ t: kind, i: index, ok: state.ok, err: state.err }));
+    raceSocket.send(JSON.stringify({ t: kind, text: state.typed }));
   }
+}
+
+function applyServerText(msg) {
+  if (!msg || typeof msg.text !== "string") return;
+  state.typed = msg.text;
+  if (Number.isFinite(msg.ok)) state.ok = msg.ok;
+  if (Number.isFinite(msg.err)) state.err = msg.err;
+  if (state.phase === "finishing" && state.typed !== state.sentence) state.phase = "race";
+  paintPassage();
+  paintStats();
+  paintLocked();
+  localLane();
 }
 
 function localLane() {
@@ -1055,7 +1066,10 @@ function openRace(raceId) {
       absorbHello(msg);
     } else if (msg.t === "state") absorbState(msg);
     else if (msg.t === "results") absorbResults(msg);
-    else if (msg.t === "wait") toast("Wait for the start.");
+    else if (msg.t === "wait") {
+      toast("Wait for the start.");
+      applyServerText(msg);
+    } else if (msg.t === "sync") applyServerText(msg);
   });
   mine.addEventListener("close", () => {
     if (mine !== raceSocket) return;

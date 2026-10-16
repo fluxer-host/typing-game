@@ -64,8 +64,12 @@ function openSocket(url) {
 }
 
 async function finish(sock, tracker, sentence) {
+  // One verified character at a time, paced under the server rate limit.
+  let text = "";
   for (let i = 1; i <= sentence.length; i++) {
-    sock.send(JSON.stringify({ t: i === sentence.length ? "fin" : "prog", i, ok: i, err: 0 }));
+    text = sentence.slice(0, i);
+    sock.send(JSON.stringify({ t: i === sentence.length ? "fin" : "prog", text }));
+    await new Promise((resolve) => setTimeout(resolve, 45));
   }
   return tracker.next((msg) => msg.t === "state" && msg.players.some((player) => player.i === sentence.length && player.finishedAt), 20000);
 }

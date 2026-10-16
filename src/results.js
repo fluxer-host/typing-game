@@ -5,13 +5,16 @@ function ordered(state) {
   const rows = state.players.map((player) => {
     const finish = state.finishes[player.id];
     const progress = state.progress[player.id] || { i: 0, ok: 0, err: 0 };
+    const dq = Boolean(progress.dq);
+    const finished = Boolean(finish) && !dq;
     return {
       player,
-      finished: Boolean(finish),
-      at: finish ? finish.at : null,
-      i: finish ? state.sentence.length : progress.i || 0,
-      ok: (finish || progress).ok || 0,
-      err: (finish || progress).err || 0,
+      dq,
+      finished,
+      at: finished ? finish.at : null,
+      i: finished ? state.sentence.length : progress.i || 0,
+      ok: (finished ? finish : progress).ok || 0,
+      err: (finished ? finish : progress).err || 0,
     };
   });
   rows.sort((a, b) => {
@@ -36,7 +39,9 @@ export function buildResults(state, now) {
     sentence: state.sentence,
     rows: rows.map((row) => {
       const before = row.player.eloAtStart ?? 1000;
-      const after = rated ? applyElo(before, deltas[row.player.id] || 0) : null;
+      // A disqualified player keeps the elo they started with. Everyone else
+      // still uses the normal pairwise result, so an honest finish still gains.
+      const after = !rated ? null : row.dq ? before : applyElo(before, deltas[row.player.id] || 0);
       const end = row.at || now;
       const elapsed = Math.max(1, end - state.startAt);
       const chars = row.finished ? state.sentence.length : row.i;

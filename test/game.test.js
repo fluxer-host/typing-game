@@ -7,6 +7,7 @@ import { buildResults } from "../src/results.js";
 import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
 import { LENGTHS, lengthList } from "../src/lengths.js";
+import { validateProgress } from "../src/progress.js";
 import { summarizeRooms } from "../src/lobby.js";
 import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
 
@@ -143,6 +144,224 @@ test("a solo practice race does not write elo", () => {
   );
   assert.equal(results.rows[0].eloAfter, null);
   assert.equal(results.rows[0].finished, true);
+});
+
+test("verified typing accepts one character at a time and counts mistakes", () => {
+  const passage = "I love Fluxer";
+  let previous = "";
+  let prior = 0;
+  for (let i = 1; i <= passage.length; i++) {
+    const verdict = validateProgress({
+      passage,
+      previous,
+      next: passage.slice(0, i),
+      elapsedMs: (i - 1) * 50,
+      recentStrokes: 0,
+      priorStrokes: prior,
+      kind: i === passage.length ? "fin" : "prog",
+    });
+    assert.equal(verdict.ok, true, verdict.reason);
+    assert.equal(verdict.index, i);
+    assert.equal(verdict.okDelta, 1);
+    assert.equal(verdict.errDelta, 0);
+    assert.equal(verdict.finished, i === passage.length);
+    previous = verdict.text;
+    prior += 1;
+  }
+
+  const wrong = validateProgress({
+    passage: "ab",
+    previous: "a",
+    next: "ax",
+    elapsedMs: 80,
+    recentStrokes: 1,
+    priorStrokes: 1,
+    kind: "prog",
+  });
+  assert.equal(wrong.ok, true);
+  assert.equal(wrong.index, 1);
+  assert.equal(wrong.errDelta, 1);
+  assert.equal(wrong.finished, false);
+  const back = validateProgress({
+    passage: "ab",
+    previous: "ax",
+    next: "a",
+    elapsedMs: 160,
+    recentStrokes: 2,
+    priorStrokes: 2,
+    kind: "prog",
+  });
+  assert.equal(back.ok, true);
+  assert.equal(back.index, 1);
+  assert.equal(back.okDelta, 0);
+  assert.equal(back.errDelta, 0);
+});
+
+test("an instant finish, a jump, and an overshoot are disqualified", () => {
+  const passage = "I love Fluxer";
+  const instant = validateProgress({
+    passage,
+    previous: "",
+    next: passage,
+    elapsedMs: 0,
+    recentStrokes: 0,
+    priorStrokes: 0,
+    kind: "fin",
+  });
+  assert.equal(instant.ok, false);
+  assert.equal(instant.reason, "jump");
+  assert.equal(instant.disqualify, true);
+
+  const swapped = validateProgress({
+    passage,
+    previous: "I love",
+    next: "Fluxer",
+    elapsedMs: 5000,
+    recentStrokes: 0,
+    priorStrokes: 6,
+    kind: "prog",
+  });
+  assert.equal(swapped.reason, "jump");
+  assert.equal(swapped.disqualify, true);
+
+  const overshoot = validateProgress({
+    passage,
+    previous: "I",
+    next: `${passage}!`,
+    elapsedMs: 5000,
+    recentStrokes: 0,
+    priorStrokes: 1,
+    kind: "fin",
+  });
+  assert.equal(overshoot.reason, "overshoot");
+  assert.equal(overshoot.disqualify, true);
+});
+
+test("impossible speed is disqualified and a single correction is kept", () => {
+  const burst = validateProgress({
+    passage: "I love Fluxer",
+    previous: "I",
+    next: "I ",
+    elapsedMs: 0,
+    recentStrokes: 1,
+    priorStrokes: 1,
+    kind: "prog",
+  });
+  assert.equal(burst.ok, false);
+  assert.equal(burst.reason, "rate");
+  assert.equal(burst.disqualify, true);
+
+  const flooded = validateProgress({
+    passage: "I love Fluxer",
+    previous: "I love",
+    next: "I love ",
+    elapsedMs: 10_000,
+    recentStrokes: 25,
+    priorStrokes: 6,
+    kind: "prog",
+  });
+  assert.equal(flooded.reason, "rate");
+  assert.equal(flooded.disqualify, true);
+
+  const stepBack = validateProgress({
+    passage: "I love Fluxer",
+    previous: "I love",
+    next: "I lov",
+    elapsedMs: 400,
+    recentStrokes: 0,
+    priorStrokes: 6,
+    kind: "prog",
+  });
+  assert.equal(stepBack.ok, true);
+  assert.equal(stepBack.index, 5);
+
+  const rewind = validateProgress({
+    passage: "I love Fluxer",
+    previous: "I love",
+    next: "I",
+    elapsedMs: 400,
+    recentStrokes: 0,
+    priorStrokes: 6,
+    kind: "prog",
+  });
+  assert.equal(rewind.ok, false);
+  assert.equal(rewind.reason, "backwards");
+  assert.equal(rewind.disqualify, true);
+});
+
+test("early and malformed progress is ignored", () => {
+  const early = validateProgress({
+    passage: "I love Fluxer",
+    previous: "",
+    next: "I",
+    elapsedMs: -1,
+    recentStrokes: 0,
+    priorStrokes: 0,
+    kind: "prog",
+  });
+  assert.equal(early.ok, false);
+  assert.equal(early.reason, "early");
+  assert.equal(early.disqualify, false);
+
+  const earlyDump = validateProgress({
+    passage: "I love Fluxer",
+    previous: "",
+    next: "I love Fluxer",
+    elapsedMs: -30,
+    recentStrokes: 0,
+    priorStrokes: 0,
+    kind: "fin",
+  });
+  assert.equal(earlyDump.reason, "early");
+  assert.equal(earlyDump.disqualify, false);
+
+  for (const input of [
+    { passage: "ab", previous: "", next: null, elapsedMs: 10, kind: "prog" },
+    { passage: "ab", previous: "", next: 2, elapsedMs: 10, kind: "prog" },
+    { passage: "ab", previous: "", next: "a", elapsedMs: 10, kind: "finish" },
+    { passage: "ab", previous: "", next: "a", elapsedMs: Number.NaN, kind: "prog" },
+    { passage: null, previous: "", next: "a", elapsedMs: 10, kind: "prog" },
+  ]) {
+    const verdict = validateProgress({ recentStrokes: 0, priorStrokes: 0, ...input });
+    assert.equal(verdict.ok, false, JSON.stringify(input));
+    assert.equal(verdict.reason, "malformed");
+    assert.equal(verdict.disqualify, false);
+  }
+});
+
+test("a disqualified player does not take the win or the elo change", () => {
+  const sentence = "I love Fluxer";
+  const start = 1_000_000;
+  const results = buildResults(
+    {
+      ranked: true,
+      mode: "desktop",
+      sentence,
+      startAt: start,
+      players: [
+        { id: "a", name: "Ada", tag: "ada", eloAtStart: 1000 },
+        { id: "b", name: "Bea", tag: "bea", eloAtStart: 1000 },
+      ],
+      finishes: {
+        a: { at: start + 8000, ok: sentence.length, err: 0 },
+      },
+      progress: {
+        b: { i: 0, ok: 0, err: 0, text: "", dq: true },
+      },
+    },
+    start + 8000,
+  );
+  const ada = results.rows.find((row) => row.id === "a");
+  const bea = results.rows.find((row) => row.id === "b");
+  assert.equal(ada.place, 1);
+  assert.equal(ada.finished, true);
+  assert.equal(ada.ms, 8000);
+  assert.equal(ada.wpm, wpm(sentence.length, 8000));
+  assert.equal(ada.eloAfter, 1016);
+  assert.equal(bea.finished, false);
+  assert.equal(bea.ms, null);
+  assert.equal(bea.eloAfter, 1000);
+  assert.notEqual(bea.place, 1);
 });
 
 function extractFunction(src, name) {
