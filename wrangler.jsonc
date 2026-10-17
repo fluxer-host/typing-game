@@ -4,9 +4,10 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-15",
   "assets": {
-    "directory": "./public",
+    "directory": "./dist",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*", "/auth/*", "/ws"]
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*", "/auth/*", "/ws", "/index.html"]
   },
   "durable_objects": {
     "bindings": [

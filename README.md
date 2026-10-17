@@ -1,6 +1,6 @@
 # Typing race
 
-A typing race for Fluxer accounts. Everyone in a match gets the same passage, types it, and the server records who finished first. The site answers on whatever hostname reaches the Worker. The header and the page title show that hostname, so `typing.fluxer.my`, a `workers.dev` host, and local `127.0.0.1:8787` are the same app.
+A typing race for Fluxer accounts. Everyone in a match gets the same passage, types it, and the server records who finished first. The site answers on whatever hostname reaches the Worker. The header shows that hostname, so `typing.fluxer.my`, a `workers.dev` host, and local `127.0.0.1:8787` are the same app. The page title stays "Typing race", and adds the current step during a race: countdown, racing, or results.
 
 ## Deploy on Workers, with static assets
 
@@ -8,7 +8,7 @@ Use a Cloudflare Worker, not Cloudflare Pages.
 
 Pages can host the HTML, and Pages Functions can run the OAuth routes. The race itself cannot live there on its own. Every racer in a match has to share one sentence, one start time, and one finish order. That room is a Durable Object with the WebSocket hibernation API. Cloudflare's Workers versus Pages matrix says Durable Objects on Pages mean a second Worker plus a binding in both production and preview. On Workers, the site, the sign-in routes, and the race rooms are one deploy.
 
-Static files in `public/` are still served from the edge. Requests for `/api/*`, `/auth/*`, and `/ws` run the Worker first. Everything else is an asset.
+The source site lives in `public/`. `npm run build` (esbuild) writes `dist/`: one minified script and one minified stylesheet, each with a content hash in the filename. Wrangler serves `dist/`. Requests for `/api/*`, `/auth/*`, `/ws`, and `/index.html` run the Worker first. `/index.html` answers 301 to `/`. Everything else is an asset. Hashed files under `/a/` are cached for a year. HTML is `no-cache`, so the next visit picks up a new hash.
 
 Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer.my` is one example. The Worker does not contain that name.
 
@@ -37,6 +37,8 @@ cp .dev.vars.example .dev.vars
 npm run db:migrate
 npm run dev
 ```
+
+`npm run dev` builds `dist/`, watches `public/`, and starts Wrangler on http://127.0.0.1:8787 . A save under `public/` rebuilds the hashed files. `npm run build` only writes `dist/`.
 
 Open http://127.0.0.1:8787 . `.dev.vars` turns on a local name entry so you can race without Fluxer. That switch is not in `wrangler.jsonc`, so `wrangler deploy` does not enable it. Leave `ALLOW_DEV_LOGIN` unset, or set it to anything other than `true`, on the deployed Worker.
 
@@ -95,6 +97,10 @@ Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must re
 npm run deploy
 ```
 
+`npm run deploy` builds `dist/` and then runs `wrangler deploy`. Link previews and the sitemap use `https://typing.fluxer.my/` as the public address. The Worker still answers on any hostname that reaches it.
+
+Replace the `Contact` line in `public/.well-known/security.txt` before the site is public. `mailto:security@example.com` is a placeholder, and that mailbox is not monitored.
+
 In the Cloudflare dashboard, attach the hostname to the `typing-fluxer` Worker. Or add the route once that zone is on the account and deploy again. For `typing.fluxer.my`:
 
 ```jsonc
@@ -107,7 +113,8 @@ Do not set `ALLOW_DEV_LOGIN` to `true` in the deployed vars.
 
 ## Layout
 
-- `public/` is the site: one page, no build step.
+- `public/` is the source site: one page, the unminified modules, and the stylesheet.
+- `script/build.mjs` minifies that front end into `dist/`. Do not edit `dist/`.
 - `src/index.js` routes HTTP and WebSocket upgrades.
 - `src/lobby.js` is the queue and private rooms.
 - `src/race.js` is one match: sentence, progress, finish order.

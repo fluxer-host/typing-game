@@ -15,7 +15,7 @@ export function config(env) {
     lengths: lengthList(),
     media: env.MEDIA_BASE || "https://fluxerusercontent.com",
     staticCdn: env.STATIC_CDN || "https://fluxerstatic.com",
-  });
+  }, { cache: "private, max-age=60" });
 }
 
 export async function health(env) {

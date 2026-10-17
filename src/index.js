@@ -39,6 +39,12 @@ export default {
       if (request.method === "POST" && path === "/auth/dev") return devLogin(request, env);
       if (path === "/ws") return websocket(request, env);
       if (path.startsWith("/api/") || path.startsWith("/auth/")) return json({ error: "not_found" }, { status: 404 });
+      if ((request.method === "GET" || request.method === "HEAD") && path === "/index.html") {
+        return new Response(null, {
+          status: 301,
+          headers: { location: "/", "cache-control": "public, max-age=3600" },
+        });
+      }
       if (env.ASSETS) return env.ASSETS.fetch(request);
       return new Response("not found", { status: 404 });
     } catch (error) {
