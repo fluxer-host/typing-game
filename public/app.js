@@ -1,3 +1,23 @@
+import {
+  applyTyping,
+  consumeInput,
+  correctLength,
+  emptyInputSession,
+  textUnits,
+} from "./input.js";
+import {
+  LOBBY_RETRY_BASE_MS,
+  LOBBY_RETRY_CAP_MS,
+  LOBBY_RETRY_LIMIT,
+  RETRY_LIMIT,
+  backoffDelay,
+  classifyMe,
+  lobbyDrop,
+  nextRaceRetry,
+  sessionShell,
+  shouldAutoRetry,
+} from "./net.js";
+
 const MODES = {
   desktop: {
     title: "Desktop",
@@ -79,15 +99,39 @@ const state = {
   shell: "",
   forfeitConfirm: false,
   forfeitedLocally: false,
+  session: "unknown",
+  configError: "",
+  boardError: "",
+  recentError: "",
+  lobbyStatus: "closed",
+  lobbyNotice: "",
+  raceLink: "up",
+  playLock: false,
 };
 
 let lobby = null;
 let raceSocket = null;
 let raceTries = 0;
+let raceLostAt = 0;
+let raceRetryTimer = null;
+let lobbyTries = 0;
+let lobbyRetryTimer = null;
+let pendingPlay = "";
+let meEpoch = 0;
 let toastTimer = null;
 let holdDelay = null;
 let holdRepeat = null;
 let leaveTimer = null;
+let inputSession = emptyInputSession();
+let refocusTries = 0;
+let inputGuardEpoch = 0;
+let composeEpoch = 0;
+const retries = {
+  me: { attempt: 0, timer: null },
+  config: { attempt: 0, timer: null },
+  board: { attempt: 0, timer: null },
+  recent: { attempt: 0, timer: null },
+};
 
 function h(tag, props, kids) {
   const node = document.createElement(tag);
@@ -127,13 +171,6 @@ function serverNow() {
   return Date.now() + state.offset;
 }
 
-function correctLength(typed, sentence) {
-  const limit = Math.min(typed.length, sentence.length);
-  let index = 0;
-  while (index < limit && typed[index] === sentence[index]) index += 1;
-  return index;
-}
-
 function wpm(chars, ms) {
   if (chars <= 0 || ms <= 0) return 0;
   return Math.round((chars / 5 / (ms / 60000)) * 10) / 10;
@@ -146,14 +183,11 @@ function currentWpm() {
 }
 
 function shellName() {
-  if (!state.config) return "loading";
-  if (!state.me) return "auth";
-  if (state.phase === "results") return "results";
-  if (state.phase === "countdown" || state.phase === "race" || state.phase === "finishing") return "race";
-  if (state.phase === "queue") return "queue";
-  if (state.phase === "room") return "room";
-  if (state.phase === "browse") return "browse";
-  return "lobby";
+  return sessionShell({
+    session: state.session,
+    phase: state.phase,
+    lobbyOpen: state.lobbyStatus === "open",
+  });
 }
 
 function cssColor(value) {
@@ -233,6 +267,12 @@ function paintShell() {
     stage.append(h("p", { class: "loading", text: "Loading the track…" }));
     return;
   }
+  if (state.shell === "boot-error") {
+    const view = bootErrorView();
+    stage.append(view);
+    view.querySelector("button")?.focus();
+    return;
+  }
   if (state.shell === "auth") stage.append(authView());
   else if (state.shell === "lobby") stage.append(lobbyView());
   else if (state.shell === "queue") stage.append(queueView());
@@ -242,12 +282,22 @@ function paintShell() {
   else if (state.shell === "results") stage.append(resultsView());
 }
 
+function bootErrorView() {
+  const box = h("div", { role: "alert" });
+  box.append(h("h1", { class: "lead", text: "The track did not load" }));
+  box.append(h("p", { class: "muted", text: "The session check failed. Retry, or wait for the next attempt." }));
+  box.append(h("div", { class: "actions" }, [
+    h("button", { class: "btn primary", type: "button", text: "Retry", onclick: retrySession }),
+  ]));
+  return box;
+}
+
 function authView() {
   const box = h("div", {});
   box.append(h("h1", { class: "lead", text: "Race the room" }));
   box.append(h("p", { class: "muted", text: "Everyone in a match gets the same Fluxer passage. First to finish wins." }));
   const actions = h("div", { class: "actions" });
-  if (state.config.oauth) {
+  if (state.config?.oauth) {
     actions.append(h("a", { class: "btn primary", href: "/auth/login", text: "Sign in with Fluxer" }));
   }
   box.append(actions);
@@ -267,7 +317,9 @@ function authView() {
           body: JSON.stringify({ name: input.value }),
         });
         state.me = data.user;
-        await loadMeta();
+        state.session = data.user ? "in" : "out";
+        clearRetry("me");
+        await Promise.allSettled([pullBoard(), pullRecent()]);
         ensure();
         resumeRace();
       } catch (error) {
@@ -277,9 +329,10 @@ function authView() {
     box.append(h("p", { class: "hint", text: "Local accounts stay on this machine. Sign in with Fluxer on the public site." }));
     box.append(form);
   }
-  if (!state.config.oauth && !state.config.devLogin) {
+  if (state.config && !state.config.oauth && !state.config.devLogin) {
     box.append(h("p", { class: "hint", text: "Add the Fluxer client id and secret, then reload." }));
   }
+  box.append(h("div", { id: "config-note", hidden: true }));
   return box;
 }
 
@@ -318,12 +371,13 @@ function lobbyView() {
     lengths.append(card);
   }
   box.append(lengths);
+  box.append(h("div", { id: "config-note", hidden: true }));
   const actions = h("div", { class: "actions" });
   const play = () => ({ mode: state.mode, length: state.length });
   actions.append(
-    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => sendLobby({ t: "queue", ...play() }) }),
-    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => sendLobby({ t: "practice", ...play() }) }),
-    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => sendLobby({ t: "room_create", ...play() }) }),
+    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => beginPlay("queue", { t: "queue", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => beginPlay("practice", { t: "practice", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => beginPlay("room", { t: "room_create", ...play() }) }),
     h("button", { class: "btn", type: "button", "data-action": "browse", text: "Open rooms", onclick: openBrowse }),
   );
   box.append(actions);
@@ -483,7 +537,16 @@ function paintRooms() {
 }
 
 function raceView() {
-  const box = h("div", { class: "race" });
+  inputSession = emptyInputSession();
+  refocusTries = 0;
+  const box = h("div", { class: "race", "data-mode": state.mode });
+  box.append(h("div", {
+    id: "race-link",
+    class: "net-banner",
+    role: "status",
+    "aria-live": "polite",
+    hidden: true,
+  }));
   const top = h("div", { class: "race-top" });
   const raceLength = lengthInfo(state.length)?.title || "Sprint";
   top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${state.ranked ? "rated" : "practice"}` }));
@@ -502,18 +565,34 @@ function raceView() {
   const capture = h("input", {
     id: "capture",
     class: "capture",
+    type: "text",
     autocomplete: "off",
     autocapitalize: "off",
     autocorrect: "off",
     spellcheck: "false",
-    "aria-label": "Typing capture",
+    inputmode: "text",
+    enterkeyhint: "done",
+    "aria-label": "Type the passage here",
   });
+  if (state.mode === "cursor") {
+    capture.tabIndex = -1;
+    capture.setAttribute("aria-hidden", "true");
+  }
   wrap.append(capture);
   box.append(wrap);
+  const tap = h("button", {
+    id: "tap-to-type",
+    class: "btn tap-type",
+    type: "button",
+    text: "Tap to type",
+    hidden: true,
+  });
+  tap.addEventListener("click", () => focusCapture());
+  box.append(tap);
   const hint = state.mode === "cursor"
     ? "Click the keys. The keyboard does not type on this ladder."
     : state.mode === "mobile"
-      ? "Tap the sentence if the phone keyboard is closed."
+      ? "Tap the sentence, or Tap to type, if the phone keyboard is closed."
       : "Type the line. Backspace fixes a miss.";
   box.append(h("p", { class: "hint", text: hint }));
   if (state.mode === "cursor") box.append(keyboard());
@@ -535,29 +614,20 @@ function raceView() {
   );
   confirm.append(confirmActions);
   box.append(confirm);
-  capture.addEventListener("keydown", (event) => {
-    if (state.mode !== "mobile") return;
-    if (event.key === "Backspace") {
-      event.preventDefault();
-      backspace();
-    }
+  capture.addEventListener("keydown", onCaptureKeyDown);
+  capture.addEventListener("beforeinput", onCaptureBeforeInput);
+  capture.addEventListener("input", onCaptureInput);
+  capture.addEventListener("compositionstart", onCompositionStart);
+  capture.addEventListener("compositionupdate", onCompositionUpdate);
+  capture.addEventListener("compositionend", onCompositionEnd);
+  capture.addEventListener("focus", () => {
+    refocusTries = 0;
+    paintCaptureFocus();
   });
-  capture.addEventListener("beforeinput", (event) => {
-    if (state.mode !== "mobile") return;
-    if (event.inputType === "insertText" && event.data) {
-      event.preventDefault();
-      for (const ch of event.data) typeChar(ch);
-    } else if (event.inputType === "deleteContentBackward") {
-      event.preventDefault();
-      backspace();
-    } else {
-      event.preventDefault();
-    }
-    capture.value = "";
-  });
-  wrap.addEventListener("pointerdown", () => {
-    if (state.mode === "mobile") capture.focus({ preventScroll: true });
-  });
+  capture.addEventListener("blur", onCaptureBlur);
+  box.addEventListener("pointerdown", keepTypingPointer);
+  box.addEventListener("mousedown", keepTypingPointer);
+  box.addEventListener("touchstart", keepTypingPointer, { passive: false });
   return box;
 }
 
@@ -604,7 +674,7 @@ function keyButton(key, label, extra) {
 }
 
 function pressKey(key) {
-  if (state.forfeitConfirm || racedOut()) return;
+  if (state.raceLink !== "up" || state.forfeitConfirm || racedOut()) return;
   if (key === "shift") {
     state.shift = !state.shift;
     paintShift();
@@ -724,7 +794,7 @@ function askRematch() {
   }
   const solo = !state.ranked || (state.players || []).length < 2;
   if (solo) {
-    sendLobby({ t: "practice", mode: state.mode, length: state.length });
+    beginPlay("practice", { t: "practice", mode: state.mode, length: state.length });
     return;
   }
   sendLobby({ t: "rematch", raceId: state.raceId });
@@ -781,6 +851,7 @@ function paintLengths() {
 }
 
 function paintDynamic() {
+  if (state.shell === "lobby" || state.shell === "auth") paintConfigNote();
   if (state.shell === "lobby") {
     paintModes();
     paintLengths();
@@ -797,7 +868,124 @@ function paintDynamic() {
     paintStats();
     paintLocked();
     paintRaceNote();
+    paintRaceBanner();
+    paintCaptureFocus();
   }
+  paintPlayButtons();
+  paintNetBanner();
+}
+
+function inlineError(message, onRetry) {
+  const box = h("div", { class: "inline-error", role: "status", "aria-live": "polite" });
+  box.append(h("p", { text: message }));
+  box.append(h("button", { class: "btn", type: "button", text: "Retry", onclick: onRetry }));
+  return box;
+}
+
+function paintConfigNote() {
+  const node = document.getElementById("config-note");
+  if (!node) return;
+  node.replaceChildren();
+  if (state.configError) {
+    node.hidden = false;
+    node.append(inlineError(state.configError, () => retryNow("config", () => pullConfig())));
+    return;
+  }
+  if (!state.config) {
+    node.hidden = false;
+    node.append(h("p", { class: "muted", text: "Loading match lengths…" }));
+    return;
+  }
+  node.hidden = true;
+}
+
+function paintPlayButtons() {
+  const locked = state.playLock;
+  for (const button of document.querySelectorAll("[data-action='queue'], [data-action='practice'], [data-action='create-room'], [data-action='queue-again'], [data-action='practice-again']")) {
+    button.disabled = locked;
+  }
+}
+
+function ensureNetBanner() {
+  let banner = document.getElementById("net-banner");
+  if (banner) return banner;
+  const layout = document.querySelector(".layout");
+  if (!layout?.parentElement) return null;
+  banner = h("div", {
+    id: "net-banner",
+    class: "net-banner",
+    role: "status",
+    "aria-live": "polite",
+    hidden: true,
+  });
+  layout.parentElement.insertBefore(banner, layout);
+  return banner;
+}
+
+function lobbyBannerView() {
+  if (state.shell === "race" || state.session !== "in") return null;
+  const notice = state.lobbyNotice;
+  if (!notice) return null;
+  if (notice === "restored-requeue") return { role: "status", text: "Back online. Queue again to join a race." };
+  if (notice === "restored-room") return { role: "status", text: "Back online. Rejoin the room if you still want to race." };
+  if (notice === "restored") return { role: "status", text: "Back online." };
+  const exhausted = lobbyTries >= LOBBY_RETRY_LIMIT && !lobbyRetryTimer && !(lobby && (lobby.readyState === WebSocket.OPEN || lobby.readyState === WebSocket.CONNECTING));
+  if (exhausted) {
+    let text = "Connection lost. Reconnect to keep racing.";
+    if (notice === "requeue") text = "Connection lost. You left the queue. Reconnect, then queue again.";
+    if (notice === "room") text = "Connection lost. The room may still be open. Reconnect, then join again.";
+    return { role: "alert", text, action: "reconnect" };
+  }
+  return { role: "status", text: "Connection lost, reconnecting..." };
+}
+
+function paintNetBanner() {
+  const banner = ensureNetBanner();
+  if (!banner) return;
+  const view = lobbyBannerView();
+  banner.replaceChildren();
+  if (!view) {
+    banner.hidden = true;
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
+    return;
+  }
+  banner.hidden = false;
+  banner.setAttribute("role", view.role);
+  if (view.role === "alert") banner.removeAttribute("aria-live");
+  else banner.setAttribute("aria-live", "polite");
+  banner.append(h("p", { text: view.text }));
+  if (view.action === "reconnect") {
+    banner.append(h("div", { class: "actions" }, [
+      h("button", { class: "btn", type: "button", text: "Reconnect", onclick: reconnectLobby }),
+    ]));
+  }
+}
+
+function paintRaceBanner() {
+  const banner = document.getElementById("race-link");
+  if (!banner) return;
+  banner.replaceChildren();
+  if (state.raceLink === "up") {
+    banner.hidden = true;
+    banner.setAttribute("role", "status");
+    banner.setAttribute("aria-live", "polite");
+    return;
+  }
+  banner.hidden = false;
+  if (state.raceLink === "lost") {
+    banner.setAttribute("role", "alert");
+    banner.removeAttribute("aria-live");
+    banner.append(h("p", { text: "The race connection was lost. Your progress stays on this screen. Try again to resume, or go back to the lobby. If the race cannot resume, the server records a timeout." }));
+    banner.append(h("div", { class: "actions" }, [
+      h("button", { class: "btn primary", type: "button", text: "Try again", onclick: retryRace }),
+      h("button", { class: "btn", type: "button", text: "Back to lobby", onclick: abandonLostRace }),
+    ]));
+    return;
+  }
+  banner.setAttribute("role", "status");
+  banner.setAttribute("aria-live", "polite");
+  banner.append(h("p", { text: "Connection lost, reconnecting..." }));
 }
 
 function paintRoom() {
@@ -875,44 +1063,215 @@ function racedOut() {
   return status === "timeout" || status === "disconnect" || status === "forfeit";
 }
 
+function eventElement(target) {
+  if (!target) return null;
+  if (target.nodeType === 1) return target;
+  return target.parentElement || null;
+}
+
+function interactiveTarget(node) {
+  const element = eventElement(node);
+  if (!element) return false;
+  if (element.id === "capture") return false;
+  if (element.closest("[role='dialog']")) return true;
+  const field = element.closest("button, a, textarea, select, input");
+  return Boolean(field && field.id !== "capture");
+}
+
+function paintCaptureFocus() {
+  const capture = document.getElementById("capture");
+  const wrap = document.querySelector(".passage-wrap");
+  const tap = document.getElementById("tap-to-type");
+  if (wrap) {
+    const on = state.mode !== "cursor" && capture && document.activeElement === capture;
+    wrap.classList.toggle("is-typing", Boolean(on));
+  }
+  if (tap) {
+    const show = state.mode === "mobile"
+      && (state.phase === "countdown" || state.phase === "race")
+      && document.activeElement !== capture;
+    tap.hidden = !show;
+  }
+}
+
+function focusCapture() {
+  if (state.mode === "cursor" || state.forfeitConfirm) {
+    paintCaptureFocus();
+    return;
+  }
+  if (state.phase !== "countdown" && state.phase !== "race") {
+    paintCaptureFocus();
+    return;
+  }
+  const capture = document.getElementById("capture");
+  if (capture && document.activeElement !== capture) capture.focus({ preventScroll: true });
+  paintCaptureFocus();
+}
+
+function keepTypingPointer(event) {
+  if (state.mode === "cursor") return;
+  if (state.phase !== "countdown" && state.phase !== "race") return;
+  const element = eventElement(event.target);
+  if (interactiveTarget(element) || element?.id === "capture") return;
+  refocusTries = 0;
+  event.preventDefault();
+  focusCapture();
+}
+
+function onCaptureBlur(event) {
+  paintCaptureFocus();
+  if (state.mode === "cursor" || state.forfeitConfirm) return;
+  if (state.phase !== "countdown" && state.phase !== "race") return;
+  if (interactiveTarget(event.relatedTarget)) return;
+  // A phone keyboard closing blurs the field with no next target. Leave that
+  // blur in place so Tap to type can open the keyboard again. A tap on the
+  // passage still focuses the field.
+  if (state.mode === "mobile" && !event.relatedTarget) return;
+  if (refocusTries >= 1) return;
+  refocusTries += 1;
+  requestAnimationFrame(() => {
+    if (state.forfeitConfirm || state.mode === "cursor") return;
+    if (state.phase !== "countdown" && state.phase !== "race") return;
+    if (interactiveTarget(document.activeElement)) {
+      paintCaptureFocus();
+      return;
+    }
+    const capture = document.getElementById("capture");
+    if (!capture || document.activeElement === capture) {
+      paintCaptureFocus();
+      return;
+    }
+    capture.focus({ preventScroll: true });
+    paintCaptureFocus();
+  });
+}
+
+function clearCapture(node) {
+  if (node && !inputSession.composing) node.value = "";
+}
+
+function releaseInputGuards() {
+  // Backspace's extra delete event is dispatched before the next macrotask.
+  const epoch = ++inputGuardEpoch;
+  setTimeout(() => {
+    if (epoch !== inputGuardEpoch) return;
+    inputSession = { ...inputSession, ignoreDelete: false };
+  }, 0);
+}
+
+function releaseComposeGuard() {
+  // Some browsers emit the committed text again shortly after compositionend.
+  // A trailing event clears the guard immediately. This timeout covers a
+  // browser that never emits one, without dropping the duplicate.
+  const epoch = ++composeEpoch;
+  setTimeout(() => {
+    if (epoch !== composeEpoch) return;
+    inputSession = { ...inputSession, suppressInsert: false, skipInput: false };
+  }, 100);
+}
+
+function onCaptureKeyDown(event) {
+  if (state.mode === "cursor" || event.key !== "Backspace") return;
+  const result = consumeInput(inputSession, { type: "keydown", key: event.key, isComposing: event.isComposing });
+  inputSession = result.session;
+  if (result.effect.effect !== "backspace") return;
+  event.preventDefault();
+  commitTyping(result.effect);
+  clearCapture(event.target);
+  releaseInputGuards();
+}
+
+function onCaptureBeforeInput(event) {
+  if (state.mode === "cursor") return;
+  const result = consumeInput(inputSession, { type: "beforeinput", inputType: event.inputType, data: event.data });
+  inputSession = result.session;
+  const kind = result.effect.effect;
+  if (kind === "defer") return;
+  event.preventDefault();
+  if (kind === "insert" || kind === "backspace") commitTyping(result.effect);
+  clearCapture(event.target);
+}
+
+function onCaptureInput(event) {
+  if (state.mode === "cursor") return;
+  const result = consumeInput(inputSession, {
+    type: "input",
+    inputType: event.inputType,
+    data: event.data,
+    value: event.target?.value || "",
+  });
+  inputSession = result.session;
+  if (result.effect.effect === "insert" || result.effect.effect === "backspace") commitTyping(result.effect);
+  clearCapture(event.target);
+}
+
+function onCompositionStart() {
+  if (state.mode === "cursor") return;
+  inputSession = consumeInput(inputSession, { type: "compositionstart" }).session;
+}
+
+function onCompositionUpdate() {
+  if (state.mode === "cursor") return;
+  inputSession = consumeInput(inputSession, { type: "compositionupdate" }).session;
+}
+
+function onCompositionEnd(event) {
+  if (state.mode === "cursor") return;
+  const data = event.data || event.target?.value || "";
+  const result = consumeInput(inputSession, { type: "compositionend", data });
+  inputSession = result.session;
+  if (result.effect.effect === "insert") commitTyping(result.effect);
+  clearCapture(event.target);
+  releaseComposeGuard();
+}
+
 function typeChar(ch) {
-  if (state.forfeitConfirm || racedOut()) return;
-  if (state.phase === "countdown") {
-    toast("Wait for the start.");
+  commitTyping({ effect: "insert", chars: textUnits(ch) });
+}
+
+function backspace() {
+  commitTyping({ effect: "backspace" });
+}
+
+function commitTyping(effect) {
+  if (!effect || effect.effect === "reject" || effect.effect === "ignore" || effect.effect === "defer") return;
+  if (state.raceLink !== "up" || state.forfeitConfirm || racedOut()) return;
+  if (effect.effect === "insert") {
+    if (state.phase === "countdown") {
+      toast("Wait for the start.");
+      return;
+    }
+    if (state.phase !== "race") return;
+    if (serverNow() < state.startAt) {
+      toast("Wait for the start.");
+      return;
+    }
+  } else if (effect.effect === "backspace") {
+    if (state.phase !== "race") return;
+  } else {
     return;
   }
-  if (state.phase !== "race") return;
-  if (serverNow() < state.startAt) {
-    toast("Wait for the start.");
-    return;
+  const result = applyTyping(
+    { typed: state.typed, sentence: state.sentence, ok: state.ok, err: state.err },
+    effect,
+  );
+  if (!result.changed) return;
+  state.ok = result.ok;
+  state.err = result.err;
+  for (const step of result.steps) {
+    state.typed = step.text;
+    if (step.kind === "fin") state.phase = "finishing";
+    publish(step.kind, step.text);
   }
-  const good = correctLength(state.typed, state.sentence);
-  if (state.typed.length > good || good >= state.sentence.length) return;
-  state.typed += ch;
-  if (ch === state.sentence[good]) state.ok += 1;
-  else state.err += 1;
-  const done = state.typed === state.sentence;
-  publish(done ? "fin" : "prog");
-  if (done) state.phase = "finishing";
   paintPassage();
   paintStats();
   paintLocked();
   localLane();
 }
 
-function backspace() {
-  if (state.forfeitConfirm || racedOut()) return;
-  if (state.phase !== "race" || !state.typed) return;
-  state.typed = state.typed.slice(0, -1);
-  publish("prog");
-  paintPassage();
-  paintStats();
-  localLane();
-}
-
-function publish(kind) {
+function publish(kind, text = state.typed) {
   if (raceSocket?.readyState === WebSocket.OPEN) {
-    raceSocket.send(JSON.stringify({ t: kind, text: state.typed }));
+    raceSocket.send(JSON.stringify({ t: kind, text }));
   }
 }
 
@@ -953,19 +1312,13 @@ function renderAccount() {
     type: "button",
     text: "Sign out",
     onclick: async () => {
-      await api("/auth/logout", { method: "POST" });
-      sessionStorage.removeItem("tg_race");
-      if (raceSocket) raceSocket.close();
-      raceSocket = null;
-      if (lobby) lobby.close();
-      lobby = null;
-      state.me = null;
-      state.recent = [];
-      state.phase = "lobby";
-      state.results = null;
-      state.players = [];
-      state.live = [];
-      ensure();
+      try {
+        await api("/auth/logout", { method: "POST" });
+      } catch {
+        toast("Could not sign out. Try again.");
+        return;
+      }
+      dropLocalSession();
     },
   }));
   slot.className = "account";
@@ -975,7 +1328,9 @@ function renderSide() {
   paintLanes();
   const you = document.getElementById("you");
   you.replaceChildren(h("h2", { text: MODES[state.mode].title }));
-  if (!state.me) {
+  if (state.session === "error") {
+    you.append(h("p", { class: "empty", text: "Session check failed." }));
+  } else if (!state.me) {
     you.append(h("p", { class: "empty", text: "Sign in to take a ladder spot." }));
   } else {
     const best = state.me.best?.[state.mode];
@@ -985,7 +1340,8 @@ function renderSide() {
   }
   const board = document.getElementById("board");
   board.replaceChildren(h("h2", { text: "Ladder" }));
-  if (!state.board.length) board.append(h("p", { class: "empty", text: "No rated races yet." }));
+  if (state.boardError) board.append(inlineError(state.boardError, () => retryNow("board", () => pullBoard())));
+  else if (!state.board.length) board.append(h("p", { class: "empty", text: "No rated races yet." }));
   for (const [index, row] of state.board.entries()) {
     const line = h("div", { class: "board-row" });
     line.append(h("b", { text: `${index + 1}. ${row.name}` }));
@@ -994,7 +1350,8 @@ function renderSide() {
   }
   const recent = document.getElementById("recent");
   recent.replaceChildren(h("h2", { text: "Recent" }));
-  if (!state.recent.length) recent.append(h("p", { class: "empty", text: "Your races show up here." }));
+  if (state.recentError) recent.append(inlineError(state.recentError, () => retryNow("recent", () => pullRecent())));
+  else if (!state.recent.length) recent.append(h("p", { class: "empty", text: "Your races show up here." }));
   for (const race of state.recent) {
     const line = h("div", { class: "recent-row" });
     const place = race.ms == null ? "DNF" : `#${race.place}`;
@@ -1039,7 +1396,7 @@ function chooseMode(mode) {
   state.mode = mode;
   localStorage.setItem("tg_mode", mode);
   paintModes();
-  loadBoard().then(() => ensure());
+  pullBoard();
 }
 
 function chooseLength(length) {
@@ -1057,30 +1414,211 @@ function socketUrl(raceId) {
   return url.toString();
 }
 
-function openLobby() {
-  if (lobby && (lobby.readyState === WebSocket.OPEN || lobby.readyState === WebSocket.CONNECTING)) return;
-  lobby = new WebSocket(socketUrl());
-  lobby.addEventListener("message", (event) => onLobby(event));
-  lobby.addEventListener("close", () => {
-    if (state.phase === "queue" || state.phase === "browse") toast("Lobby connection closed.");
+function lobbySocketLive(sock = lobby) {
+  return Boolean(sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING));
+}
+
+function stopLobbyRetry() {
+  clearTimeout(lobbyRetryTimer);
+  lobbyRetryTimer = null;
+}
+
+function stopLobby() {
+  stopLobbyRetry();
+  lobbyTries = 0;
+  state.lobbyStatus = "closed";
+  state.lobbyNotice = "";
+  const sock = lobby;
+  lobby = null;
+  if (sock) {
+    sock.abandoned = true;
+    try { sock.close(); } catch { /* closed */ }
+  }
+}
+
+function connectLobby() {
+  if (state.session !== "in") return;
+  if (lobbySocketLive()) return;
+  let sock;
+  try {
+    sock = new WebSocket(socketUrl());
+  } catch {
+    handleLobbyDown(null, false);
+    return;
+  }
+  lobby = sock;
+  state.lobbyStatus = "connecting";
+  sock.addEventListener("open", () => {
+    if (sock !== lobby) return;
+    sock.wasOpen = true;
+    state.lobbyStatus = "open";
+    lobbyTries = 0;
+    stopLobbyRetry();
+    if (state.playLock) state.lobbyNotice = "";
+    else if (state.lobbyNotice === "requeue") state.lobbyNotice = "restored-requeue";
+    else if (state.lobbyNotice === "room") state.lobbyNotice = "restored-room";
+    else if (state.lobbyNotice === "reconnect") state.lobbyNotice = "restored";
+    if (state.phase === "browse") {
+      try { sock.send(JSON.stringify({ t: "browse" })); } catch { /* closed */ }
+    }
+    ensure();
+  });
+  sock.addEventListener("message", (event) => onLobby(event));
+  sock.addEventListener("error", () => {
+    if (sock !== lobby) return;
+    handleLobbyDown(sock, Boolean(sock.wasOpen));
+  });
+  sock.addEventListener("close", () => {
+    if (sock.abandoned) return;
+    if (sock !== lobby && lobby !== null) return;
+    const wasOpen = Boolean(sock.wasOpen);
+    if (lobby === sock) lobby = null;
+    handleLobbyDown(sock, wasOpen);
   });
 }
 
+function handleLobbyDown(sock, wasOpen) {
+  if (sock?.abandoned) return;
+  if (state.session !== "in") return;
+  if (sock?.downHandled) {
+    scheduleLobbyRetry();
+    return;
+  }
+  if (sock) sock.downHandled = true;
+  if (wasOpen) {
+    const drop = lobbyDrop(state.phase);
+    state.phase = drop.phase;
+    if (drop.clearQueue) state.queue = null;
+    if (drop.clearRoom) state.room = null;
+    state.lobbyNotice = drop.notice;
+  } else if (!state.lobbyNotice || state.lobbyNotice.startsWith("restored")) {
+    state.lobbyNotice = "reconnect";
+  }
+  state.lobbyStatus = "lost";
+  releasePlay();
+  ensure();
+  scheduleLobbyRetry();
+}
+
+function watchSockets() {
+  const sock = lobby;
+  if (sock && !sock.abandoned && !sock.downHandled && sock.readyState !== WebSocket.OPEN && sock.readyState !== WebSocket.CONNECTING) {
+    handleLobbyDown(sock, Boolean(sock.wasOpen));
+  }
+  const race = raceSocket;
+  if (!race || !state.raceId || race.downHandled || state.forfeitedLocally || !raceStillHere()) return;
+  if (race.readyState === WebSocket.OPEN || race.readyState === WebSocket.CONNECTING) return;
+  race.downHandled = true;
+  armRaceRetry(state.raceId);
+}
+
+function scheduleLobbyRetry() {
+  if (state.session !== "in") return;
+  if (lobbyRetryTimer || lobbySocketLive()) return;
+  if (lobbyTries >= LOBBY_RETRY_LIMIT) {
+    ensure();
+    return;
+  }
+  const delay = backoffDelay(lobbyTries, LOBBY_RETRY_BASE_MS, LOBBY_RETRY_CAP_MS);
+  lobbyTries += 1;
+  lobbyRetryTimer = setTimeout(() => {
+    lobbyRetryTimer = null;
+    if (state.session !== "in") return;
+    connectLobby();
+  }, delay);
+}
+
+function reconnectLobby() {
+  if (state.session !== "in") return;
+  lobbyTries = 0;
+  stopLobbyRetry();
+  if (lobby) {
+    const sock = lobby;
+    lobby = null;
+    sock.abandoned = true;
+    try { sock.close(); } catch { /* closed */ }
+  }
+  releasePlay();
+  if (!state.lobbyNotice || state.lobbyNotice.startsWith("restored")) state.lobbyNotice = "reconnect";
+  state.lobbyStatus = "lost";
+  ensure();
+  connectLobby();
+}
+
 function sendLobby(payload) {
-  openLobby();
-  const send = () => lobby?.send(JSON.stringify(payload));
-  if (lobby.readyState === WebSocket.OPEN) send();
-  else lobby.addEventListener("open", send, { once: true });
+  if (state.session !== "in") return false;
+  try {
+    connectLobby();
+  } catch {
+    return false;
+  }
+  if (!lobby) return false;
+  const sock = lobby;
+  const body = JSON.stringify(payload);
+  const deliver = () => {
+    if (sock !== lobby || sock.readyState !== WebSocket.OPEN) return false;
+    try {
+      sock.send(body);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (sock.readyState === WebSocket.OPEN) return deliver();
+  if (sock.readyState === WebSocket.CONNECTING) {
+    sock.addEventListener("open", () => {
+      if (sock !== lobby) return;
+      if (!deliver()) releasePlay();
+    }, { once: true });
+    return true;
+  }
+  return false;
+}
+
+function beginPlay(kind, payload) {
+  if (state.playLock || state.session !== "in") return;
+  state.playLock = true;
+  pendingPlay = kind;
+  paintPlayButtons();
+  if (!sendLobby(payload)) {
+    const queuedView = kind === "queue" && state.phase === "queue";
+    releasePlay();
+    if (queuedView) {
+      state.phase = "lobby";
+      state.queue = null;
+      ensure();
+    }
+    toast("The lobby is not connected.");
+  }
+}
+
+function releasePlay() {
+  state.playLock = false;
+  pendingPlay = "";
+  paintPlayButtons();
 }
 
 function onLobby(event) {
   if (event.target !== lobby) return;
-  const msg = JSON.parse(event.data);
+  let msg;
+  try {
+    msg = JSON.parse(event.data);
+  } catch {
+    return;
+  }
   if (msg.t === "error") {
     toast(msg.error || "Something went wrong.");
+    if (pendingPlay === "queue" && state.phase === "queue") {
+      state.phase = "lobby";
+      state.queue = null;
+    }
+    releasePlay();
+    ensure();
     return;
   }
   if (msg.t === "queued") {
+    releasePlay();
+    state.lobbyNotice = "";
     state.queue = msg;
     state.phase = "queue";
     state.mode = msg.mode;
@@ -1089,6 +1627,8 @@ function onLobby(event) {
     return;
   }
   if (msg.t === "room") {
+    releasePlay();
+    state.lobbyNotice = "";
     state.room = msg;
     state.mode = msg.mode || state.mode;
     if (msg.length) state.length = msg.length;
@@ -1131,6 +1671,12 @@ function startMatch(msg) {
   state.rematch = null;
   state.forfeitConfirm = false;
   state.forfeitedLocally = false;
+  state.lobbyNotice = "";
+  state.raceLink = "up";
+  raceTries = 0;
+  raceLostAt = 0;
+  stopRaceRetry();
+  releasePlay();
   state.phase = serverNow() < state.startAt ? "countdown" : "race";
   state.shell = "";
   sessionStorage.setItem("tg_race", msg.raceId);
@@ -1138,18 +1684,45 @@ function startMatch(msg) {
   if (state.length) localStorage.setItem("tg_length", state.length);
   ensure();
   openRace(msg.raceId);
+  focusCapture();
+}
+
+function stopRaceRetry() {
+  clearTimeout(raceRetryTimer);
+  raceRetryTimer = null;
+}
+
+function raceStillHere() {
+  return state.phase === "race" || state.phase === "countdown" || state.phase === "finishing";
 }
 
 function openRace(raceId) {
+  stopRaceRetry();
   const previous = raceSocket;
-  const mine = new WebSocket(socketUrl(raceId));
+  let mine;
+  try {
+    mine = new WebSocket(socketUrl(raceId));
+  } catch {
+    armRaceRetry(raceId);
+    return;
+  }
   raceSocket = mine;
-  if (previous) previous.close();
+  if (previous && previous !== mine) {
+    try { previous.close(); } catch { /* closed */ }
+  }
   mine.addEventListener("message", (event) => {
     if (mine !== raceSocket) return;
-    const msg = JSON.parse(event.data);
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      return;
+    }
     if (msg.t === "hello") {
       raceTries = 0;
+      raceLostAt = 0;
+      state.raceLink = "up";
+      stopRaceRetry();
       absorbHello(msg);
     } else if (msg.t === "state") absorbState(msg);
     else if (msg.t === "results") absorbResults(msg);
@@ -1159,22 +1732,59 @@ function openRace(raceId) {
       applyServerText(msg);
     } else if (msg.t === "sync") applyServerText(msg);
   });
-  mine.addEventListener("close", () => {
-    if (mine !== raceSocket) return;
-    if (state.forfeitedLocally) return;
-    if (state.phase !== "race" && state.phase !== "countdown" && state.phase !== "finishing") return;
-    raceTries += 1;
-    if (raceTries > 3) {
-      sessionStorage.removeItem("tg_race");
-      toast("Lost the race connection.");
-      state.phase = "lobby";
-      ensure();
-      return;
-    }
-    setTimeout(() => {
-      if (state.raceId === raceId && mine === raceSocket) openRace(raceId);
-    }, 400);
-  });
+  const noteDown = () => {
+    if (mine.downHandled || mine !== raceSocket || state.forfeitedLocally || !raceStillHere()) return;
+    mine.downHandled = true;
+    armRaceRetry(raceId);
+  };
+  mine.addEventListener("error", noteDown);
+  mine.addEventListener("close", noteDown);
+}
+
+function armRaceRetry(raceId) {
+  if (state.forfeitedLocally || !raceStillHere()) return;
+  if (!raceLostAt) raceLostAt = Date.now();
+  const delay = nextRaceRetry(raceTries, Date.now() - raceLostAt);
+  if (delay == null) {
+    state.raceLink = "lost";
+    stopRaceRetry();
+    ensure();
+    return;
+  }
+  state.raceLink = "retry";
+  raceTries += 1;
+  ensure();
+  stopRaceRetry();
+  raceRetryTimer = setTimeout(() => {
+    raceRetryTimer = null;
+    if (state.forfeitedLocally || state.raceId !== raceId || !raceStillHere()) return;
+    openRace(raceId);
+  }, delay);
+}
+
+function retryRace() {
+  const raceId = state.raceId || sessionStorage.getItem("tg_race");
+  if (!raceId) {
+    abandonLostRace();
+    return;
+  }
+  raceTries = 0;
+  raceLostAt = 0;
+  state.raceId = raceId;
+  state.raceLink = "retry";
+  if (!raceStillHere()) state.phase = "countdown";
+  ensure();
+  openRace(raceId);
+}
+
+function abandonLostRace() {
+  state.forfeitedLocally = true;
+  stopRaceRetry();
+  releaseRaceSocket();
+  state.forfeitedLocally = false;
+  state.raceLink = "up";
+  raceLostAt = 0;
+  exitToLobby();
 }
 
 function absorbHello(msg) {
@@ -1209,7 +1819,11 @@ function absorbHello(msg) {
   }
   if (mine?.finishedAt) state.phase = "finishing";
   else state.phase = serverNow() < state.startAt ? "countdown" : "race";
+  const painted = document.querySelector(".race");
+  if (painted && painted.dataset.mode !== state.mode) state.shell = "";
   ensure();
+  if (state.mode === "cursor") document.getElementById("capture")?.blur();
+  else focusCapture();
 }
 
 function absorbState(msg) {
@@ -1238,8 +1852,10 @@ function absorbResults(msg) {
   }
   state.phase = "results";
   state.forfeitConfirm = false;
+  state.raceLink = "up";
+  stopRaceRetry();
   ensure();
-  loadMeta().then(() => renderSide());
+  refreshAfterRace();
 }
 
 function clearResume() {
@@ -1250,12 +1866,19 @@ function clearResume() {
 }
 
 function releaseRaceSocket() {
+  stopRaceRetry();
   clearResume();
-  if (raceSocket) raceSocket.close();
+  const sock = raceSocket;
   raceSocket = null;
+  if (sock) {
+    try { sock.close(); } catch { /* closed */ }
+  }
 }
 
 function exitToLobby() {
+  stopRaceRetry();
+  raceLostAt = 0;
+  state.raceLink = "up";
   clearResume();
   state.raceId = null;
   state.phase = "lobby";
@@ -1355,72 +1978,52 @@ function commitLeave() {
 }
 
 function practiceAgain() {
+  if (state.playLock) return;
   const mode = state.mode;
   const length = state.length;
   releaseRaceSocket();
-  sendLobby({ t: "practice", mode, length });
+  beginPlay("practice", { t: "practice", mode, length });
 }
 
 function queueAgain() {
+  if (state.playLock) return;
   const mode = state.mode;
   const length = state.length;
   releaseRaceSocket();
-  state.phase = "queue";
-  state.results = null;
-  state.sentence = "";
-  state.typed = "";
-  state.players = [];
-  state.live = [];
-  state.room = null;
-  state.rematch = null;
-  state.queue = { waiting: 1, mode, length };
-  ensure();
-  sendLobby({ t: "queue", mode, length });
+  if (lobby?.readyState === WebSocket.OPEN) {
+    state.phase = "queue";
+    state.queue = { waiting: 1, mode, length };
+    state.results = null;
+    state.sentence = "";
+    state.typed = "";
+    state.players = [];
+    state.live = [];
+    state.room = null;
+    state.rematch = null;
+    state.forfeitConfirm = false;
+    state.forfeitedLocally = false;
+    ensure();
+  }
+  beginPlay("queue", { t: "queue", mode, length });
 }
 
 function leaveRace() {
   state.forfeitedLocally = false;
   state.forfeitConfirm = false;
   releaseRaceSocket();
-  state.phase = "lobby";
-  state.results = null;
-  state.sentence = "";
-  state.typed = "";
-  state.players = [];
-  state.live = [];
-  state.room = null;
-  state.queue = null;
-  state.rematch = null;
-  ensure();
+  exitToLobby();
 }
 
 function resumeRace() {
   const raceId = sessionStorage.getItem("tg_race");
-  if (!state.me || !raceId) return;
+  if (state.session !== "in" || !raceId) return;
   state.raceId = raceId;
   state.phase = "countdown";
+  state.raceLink = "up";
+  state.shell = "";
+  ensure();
   openRace(raceId);
-}
-
-async function loadBoard() {
-  const data = await api(`/api/leaderboard?mode=${encodeURIComponent(state.mode)}`);
-  state.board = data.rows || [];
-}
-
-async function loadMeta() {
-  await loadBoard();
-  if (!state.me) {
-    state.recent = [];
-    return;
-  }
-  try {
-    const data = await api("/api/me/races");
-    state.recent = data.races || [];
-  } catch {
-    state.recent = [];
-  }
-  const me = await api("/api/me");
-  if (me.user) state.me = me.user;
+  focusCapture();
 }
 
 document.addEventListener("keydown", (event) => {
@@ -1431,10 +2034,13 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // The focused capture field owns inserts and deletes. This covers a desktop
+  // race whose hidden field is not the target yet, so a physical key still counts.
   if (state.mode !== "desktop") return;
   if (state.phase !== "race" && state.phase !== "countdown") return;
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
-  if (event.target && event.target.matches && event.target.matches("input, textarea") && event.target.id !== "capture") return;
+  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+  if (event.target?.id === "capture") return;
+  if (event.target?.matches?.("input, textarea, button, a, select")) return;
   if (event.key === "Backspace") {
     event.preventDefault();
     backspace();
@@ -1442,6 +2048,11 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     typeChar(event.key);
   }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  focusCapture();
 });
 
 document.addEventListener("paste", (event) => {
@@ -1457,6 +2068,8 @@ function stopHold() {
   holdDelay = null;
   holdRepeat = null;
 }
+
+setInterval(watchSockets, 250);
 
 setInterval(() => {
   if (state.shell !== "race") return;
@@ -1479,12 +2092,192 @@ setInterval(() => {
 function beginRace() {
   if (state.phase !== "countdown") return;
   state.phase = "race";
-  if (state.mode === "mobile") document.getElementById("capture")?.focus({ preventScroll: true });
+  focusCapture();
 }
 
 function showCount(node, text) {
   node.hidden = false;
   node.textContent = text;
+}
+
+function clearRetry(key) {
+  const row = retries[key];
+  if (!row) return;
+  clearTimeout(row.timer);
+  row.timer = null;
+  row.attempt = 0;
+}
+
+function scheduleRetry(key, run) {
+  const row = retries[key];
+  if (!row || row.timer || row.attempt >= RETRY_LIMIT) return;
+  const delay = backoffDelay(row.attempt);
+  row.attempt += 1;
+  row.timer = setTimeout(() => {
+    row.timer = null;
+    run();
+  }, delay);
+}
+
+function retryNow(key, run) {
+  clearRetry(key);
+  run();
+}
+
+function retrySession() {
+  meEpoch += 1;
+  clearRetry("me");
+  state.session = "unknown";
+  ensure();
+  pullMe();
+}
+
+async function pull(path, options) {
+  try {
+    const data = await api(path, options);
+    return { ok: true, status: 200, data };
+  } catch (error) {
+    return { ok: false, status: Number(error?.status) || 0, message: error?.message || "request failed" };
+  }
+}
+
+function applyMe(result) {
+  const previous = state.session;
+  const kind = result.ok
+    ? classifyMe({ ok: true, user: result.data?.user ?? null })
+    : classifyMe({ ok: false, status: result.status });
+  if (kind === "in") {
+    state.session = "in";
+    state.me = result.data.user;
+    clearRetry("me");
+    if (previous !== "in") pullRecent();
+    return;
+  }
+  if (kind === "out") {
+    if (previous === "in") dropLocalSession();
+    else {
+      state.session = "out";
+      state.me = null;
+      state.recent = [];
+      state.recentError = "";
+      clearRetry("me");
+    }
+    return;
+  }
+  if (previous === "unknown" || previous === "error") {
+    state.session = "error";
+    if (shouldAutoRetry(result.status)) scheduleRetry("me", () => pullMe());
+  }
+}
+
+async function pullMe() {
+  const epoch = meEpoch;
+  const result = await pull("/api/me");
+  if (epoch !== meEpoch) return;
+  applyMe(result);
+  ensure();
+}
+
+async function pullConfig() {
+  const result = await pull("/api/config");
+  if (result.ok) {
+    const first = !state.config;
+    state.config = result.data;
+    state.configError = "";
+    clearRetry("config");
+    if (state.config?.lengths?.length && !lengthInfo(state.length)) state.length = state.config.lengths[0].id;
+    if (first && state.shell !== "race" && state.shell !== "results") state.shell = "";
+  } else {
+    state.configError = "Lengths and sign-in options did not load.";
+    if (shouldAutoRetry(result.status)) scheduleRetry("config", () => pullConfig());
+  }
+  ensure();
+}
+
+async function pullBoard() {
+  const mode = state.mode;
+  const result = await pull(`/api/leaderboard?mode=${encodeURIComponent(mode)}`);
+  if (mode !== state.mode) return;
+  if (result.ok) {
+    state.board = result.data?.rows || [];
+    state.boardError = "";
+    clearRetry("board");
+  } else {
+    state.boardError = "The ladder did not load.";
+    if (shouldAutoRetry(result.status)) scheduleRetry("board", () => pullBoard());
+  }
+  ensure();
+}
+
+async function pullRecent() {
+  if (state.session !== "in") {
+    state.recent = [];
+    state.recentError = "";
+    return;
+  }
+  const result = await pull("/api/me/races");
+  if (state.session !== "in") return;
+  if (result.ok) {
+    state.recent = result.data?.races || [];
+    state.recentError = "";
+    clearRetry("recent");
+  } else {
+    state.recentError = "Recent races did not load.";
+    if (shouldAutoRetry(result.status)) scheduleRetry("recent", () => pullRecent());
+  }
+  ensure();
+}
+
+async function refreshProfile() {
+  const epoch = meEpoch;
+  const result = await pull("/api/me");
+  if (epoch !== meEpoch) return;
+  const kind = result.ok
+    ? classifyMe({ ok: true, user: result.data?.user ?? null })
+    : classifyMe({ ok: false, status: result.status });
+  if (kind === "in") {
+    state.me = result.data.user;
+    state.session = "in";
+    renderAccount();
+    renderSide();
+    return;
+  }
+  if (kind === "out") dropLocalSession();
+}
+
+function dropLocalSession() {
+  meEpoch += 1;
+  clearRetry("me");
+  clearResume();
+  state.forfeitedLocally = true;
+  stopRaceRetry();
+  const race = raceSocket;
+  raceSocket = null;
+  if (race) {
+    try { race.close(); } catch { /* closed */ }
+  }
+  state.forfeitedLocally = false;
+  stopLobby();
+  state.session = "out";
+  state.me = null;
+  state.recent = [];
+  state.recentError = "";
+  state.phase = "lobby";
+  state.results = null;
+  state.players = [];
+  state.live = [];
+  state.queue = null;
+  state.room = null;
+  state.playLock = false;
+  pendingPlay = "";
+  state.raceLink = "up";
+  raceLostAt = 0;
+  raceTries = 0;
+  ensure();
+}
+
+function refreshAfterRace() {
+  return Promise.allSettled([pullBoard(), pullRecent(), refreshProfile()]);
 }
 
 async function boot() {
@@ -1496,19 +2289,19 @@ async function boot() {
     history.replaceState({}, "", next ? `/?${next}` : "/");
   }
   if (!MODES[state.mode]) state.mode = "desktop";
-  state.config = await api("/api/config");
-  if (state.config.lengths?.length && !lengthInfo(state.length)) state.length = state.config.lengths[0].id;
-  const me = await api("/api/me");
-  state.me = me.user;
-  await loadMeta();
-  ensure();
-  if (state.me && params.get("room") && !sessionStorage.getItem("tg_race")) {
-    sendLobby({ t: "room_join", code: params.get("room") });
+  ensureNetBanner();
+  try {
+    await Promise.allSettled([pullMe(), pullConfig(), pullBoard()]);
+    ensure();
+    if (state.session === "in" && params.get("room") && !sessionStorage.getItem("tg_race")) {
+      sendLobby({ t: "room_join", code: params.get("room") });
+    }
+    if (state.session === "in") resumeRace();
+  } catch (error) {
+    console.error(error);
+    if (state.session === "unknown") state.session = "error";
+    ensure();
   }
-  resumeRace();
 }
 
-boot().catch((error) => {
-  console.error(error);
-  toast("The track did not load.");
-});
+boot();

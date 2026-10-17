@@ -248,7 +248,18 @@ button { cursor: pointer; }
   border: 0;
   padding: 0;
   font-size: 16px;
+  caret-color: transparent;
 }
+
+.passage-wrap.is-typing {
+  outline: 2px solid var(--flux-2);
+  outline-offset: 4px;
+  border-radius: 12px;
+}
+
+.tap-type { margin-top: 12px; }
+
+.tap-type[hidden] { display: none; }
 
 .keyboard { margin-top: 18px; display: grid; gap: 6px; user-select: none; touch-action: manipulation; }
 
@@ -335,10 +346,36 @@ tr.me { background: rgba(70, 65, 217, 0.16); }
 }
 
 button:focus-visible, a:focus-visible, input:focus-visible,
-#leave-race:focus-visible, .forfeit button:focus-visible {
+#leave-race:focus-visible, .forfeit button:focus-visible,
+.net-banner button:focus-visible, .inline-error button:focus-visible {
   outline: 2px solid var(--flux-2);
   outline-offset: 2px;
 }
+
+.capture:focus,
+.capture:focus-visible {
+  outline: none;
+}
+
+.net-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-3);
+}
+
+.net-banner[hidden] { display: none; }
+
+.net-banner p { margin: 0; }
+
+.net-banner .actions { margin-top: 8px; }
+
+.inline-error { margin-top: 8px; }
+
+.inline-error[hidden] { display: none; }
+
+.inline-error p { margin: 0 0 8px; color: var(--muted); }
 
 .forfeit {
   margin-top: 12px;

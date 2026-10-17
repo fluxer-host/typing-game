@@ -11,6 +11,27 @@ import { LENGTHS, lengthList } from "../src/lengths.js";
 import { validateProgress } from "../src/progress.js";
 import { summarizeRooms } from "../src/lobby.js";
 import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
+import {
+  applyTyping,
+  consumeInput,
+  correctLength,
+  emptyInputSession,
+  settleInput,
+  textUnits,
+} from "../public/input.js";
+import {
+  RETRY_BASE_MS,
+  RETRY_CAP_MS,
+  RETRY_LIMIT,
+  RACE_RECONNECT_BASE_MS,
+  RACE_RECONNECT_GRACE_MS,
+  backoffDelay,
+  classifyMe,
+  lobbyDrop,
+  nextRaceRetry,
+  sessionShell,
+  shouldAutoRetry,
+} from "../public/net.js";
 
 test("sentences stay on the shared keyboard", () => {
   assert.ok(SENTENCES.some((row) => row.text === "I love Fluxer" && row.cursor));
@@ -632,4 +653,225 @@ test("session tokens are signed and expire", async () => {
   const stale = await signPayload({ sid: "abc", exp: Date.now() - 1000 }, secret);
   assert.equal(await readPayload(stale, secret), null);
   assert.equal(await readPayload(token, "a-different-secret-value"), null);
+});
+
+test("backoff grows from the base and then stays at the cap", () => {
+  assert.equal(backoffDelay(0), RETRY_BASE_MS);
+  assert.equal(backoffDelay(1), RETRY_BASE_MS * 2);
+  assert.equal(backoffDelay(2), RETRY_BASE_MS * 4);
+  assert.equal(backoffDelay(20), RETRY_CAP_MS);
+  assert.equal(backoffDelay(-3), RETRY_BASE_MS);
+  assert.equal(backoffDelay(Number.NaN), RETRY_BASE_MS);
+  assert.equal(backoffDelay(0, 300, 4_000), 300);
+  assert.equal(backoffDelay(4, 300, 4_000), 4_000);
+  assert.ok(RETRY_LIMIT >= 1);
+});
+
+test("session state follows /api/me and ignores config", () => {
+  assert.equal(classifyMe({ ok: true, user: { id: "a" } }), "in");
+  assert.equal(classifyMe({ ok: true, user: null }), "out");
+  assert.equal(classifyMe({ ok: true }), "out");
+  assert.equal(classifyMe({ ok: false, status: 401 }), "out");
+  assert.equal(classifyMe({ ok: false, status: 500 }), "error");
+  assert.equal(classifyMe({ ok: false, status: 503 }), "error");
+  assert.equal(classifyMe({ ok: false, status: 404 }), "error");
+  assert.equal(classifyMe({ ok: false }), "error");
+  assert.equal(classifyMe(null), "error");
+  assert.equal(sessionShell({ session: "unknown", phase: "lobby", lobbyOpen: false }), "loading");
+  assert.equal(sessionShell({ session: "error", phase: "lobby", lobbyOpen: false }), "boot-error");
+  assert.equal(sessionShell({ session: "out", phase: "race", lobbyOpen: true }), "auth");
+  assert.equal(sessionShell({ session: "in", phase: "lobby", lobbyOpen: false }), "lobby");
+  assert.equal(sessionShell({ session: "in", phase: "queue", lobbyOpen: false }), "lobby");
+  assert.equal(sessionShell({ session: "in", phase: "queue", lobbyOpen: true }), "queue");
+  assert.equal(sessionShell({ session: "in", phase: "room", lobbyOpen: false }), "lobby");
+  assert.equal(sessionShell({ session: "in", phase: "browse", lobbyOpen: true }), "browse");
+  assert.equal(sessionShell({ session: "in", phase: "race", lobbyOpen: false }), "race");
+  assert.equal(sessionShell({ session: "in", phase: "countdown", lobbyOpen: false }), "race");
+  assert.equal(sessionShell({ session: "in", phase: "results", lobbyOpen: false }), "results");
+});
+
+test("automatic retries cover network failures and server errors", () => {
+  for (const status of [null, undefined, 0, 408, 429, 500, 503, 599]) {
+    assert.equal(shouldAutoRetry(status), true, String(status));
+  }
+  for (const status of [200, 400, 401, 403, 404, 422]) {
+    assert.equal(shouldAutoRetry(status), false, String(status));
+  }
+});
+
+test("a lobby drop clears queue and room membership", () => {
+  assert.deepEqual(lobbyDrop("queue"), { phase: "lobby", clearQueue: true, clearRoom: false, notice: "requeue" });
+  assert.deepEqual(lobbyDrop("room"), { phase: "lobby", clearQueue: false, clearRoom: true, notice: "room" });
+  assert.deepEqual(lobbyDrop("browse"), { phase: "lobby", clearQueue: false, clearRoom: false, notice: "reconnect" });
+  const race = lobbyDrop("race");
+  assert.equal(race.phase, "race");
+  assert.equal(race.clearQueue, false);
+  assert.equal(race.notice, "reconnect");
+  const lobby = lobbyDrop("lobby");
+  assert.equal(lobby.phase, "lobby");
+  assert.equal(lobby.notice, "reconnect");
+});
+
+test("race reconnect keeps trying inside the server grace window", () => {
+  assert.equal(RACE_RECONNECT_GRACE_MS, RECONNECT_GRACE_MS);
+  let elapsed = 0;
+  let attempt = 0;
+  const delays = [];
+  while (attempt < 20) {
+    const delay = nextRaceRetry(attempt, elapsed);
+    if (delay == null) break;
+    delays.push(delay);
+    elapsed += delay;
+    attempt += 1;
+  }
+  assert.ok(delays.length > 3, `only ${delays.length} attempts`);
+  assert.ok(elapsed < RACE_RECONNECT_GRACE_MS);
+  assert.equal(nextRaceRetry(attempt, elapsed), null);
+  assert.equal(delays[0], RACE_RECONNECT_BASE_MS);
+  assert.equal(nextRaceRetry(0, RACE_RECONNECT_GRACE_MS), null);
+  assert.equal(nextRaceRetry(0, -1), null);
+  assert.equal(nextRaceRetry(0, 0, 0), null);
+});
+
+function legacyCorrectLength(typed, sentence) {
+  const limit = Math.min(typed.length, sentence.length);
+  let index = 0;
+  while (index < limit && typed[index] === sentence[index]) index += 1;
+  return index;
+}
+
+test("typed text grows by one character and stops on a mismatch", () => {
+  const sentence = "I love Fluxer";
+  const first = applyTyping(
+    { typed: "", sentence, ok: 0, err: 0 },
+    consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "insertText", data: "I" }).effect,
+  );
+  assert.equal(first.typed, "I");
+  assert.equal(first.ok, 1);
+  assert.equal(first.err, 0);
+  assert.equal(first.steps.length, 1);
+  assert.equal(first.steps[0].kind, "prog");
+  assert.equal(first.steps[0].text, "I");
+
+  const wrong = applyTyping({ ...first, sentence }, { effect: "insert", chars: ["x"] });
+  assert.equal(wrong.typed, "Ix");
+  assert.equal(wrong.ok, 1);
+  assert.equal(wrong.err, 1);
+  const stopped = applyTyping({ ...wrong, sentence }, { effect: "insert", chars: ["l"] });
+  assert.equal(stopped.typed, "Ix");
+  assert.equal(stopped.changed, false);
+  assert.equal(stopped.err, 1);
+
+  const erased = applyTyping(
+    { ...wrong, sentence },
+    consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "deleteContentBackward" }).effect,
+  );
+  assert.equal(erased.typed, "I");
+  assert.equal(erased.ok, 1);
+  assert.equal(erased.err, 1);
+  assert.equal(erased.steps[0].text, "I");
+
+  const word = applyTyping(
+    { typed: "hello", sentence: "hello", ok: 5, err: 0 },
+    consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "deleteWordBackward" }).effect,
+  );
+  assert.equal(word.typed, "hell");
+  assert.equal(word.ok, 5);
+  assert.equal(word.steps.length, 1);
+});
+
+test("accented input matches the passage after NFC and finishes once", () => {
+  const sentence = "caf\u00e9";
+  const typed = applyTyping(
+    { typed: "caf", sentence, ok: 3, err: 0 },
+    { effect: "insert", chars: textUnits("e\u0301") },
+  );
+  assert.deepEqual(textUnits("e\u0301"), ["\u00e9"]);
+  assert.equal(typed.typed, sentence);
+  assert.equal(typed.ok, 4);
+  assert.equal(typed.err, 0);
+  assert.equal(typed.finished, true);
+  assert.equal(typed.steps.at(-1).kind, "fin");
+  assert.equal(correctLength(typed.typed, "cafe\u0301"), 4);
+  assert.equal(correctLength("I love", "I love Fluxer"), legacyCorrectLength("I love", "I love Fluxer"));
+  assert.equal(correctLength("Ix", "I love"), legacyCorrectLength("Ix", "I love"));
+});
+
+test("composition end commits once and a following insert is ignored", () => {
+  let session = emptyInputSession();
+  session = consumeInput(session, { type: "compositionstart" }).session;
+  const partial = consumeInput(session, { type: "beforeinput", inputType: "insertCompositionText", data: "e" });
+  assert.equal(partial.effect.effect, "defer");
+  session = partial.session;
+  const ended = consumeInput(session, { type: "compositionend", data: "e\u0301" });
+  assert.equal(ended.effect.effect, "insert");
+  assert.deepEqual(ended.effect.chars, ["\u00e9"]);
+  const repeat = consumeInput(ended.session, { type: "beforeinput", inputType: "insertText", data: "\u00e9" });
+  assert.equal(repeat.effect.effect, "ignore");
+  const trailed = consumeInput(repeat.session, { type: "input", inputType: "insertText", data: "\u00e9", value: "\u00e9" });
+  assert.equal(trailed.effect.effect, "ignore");
+  const typed = applyTyping({ typed: "", sentence: "\u00e9", ok: 0, err: 0 }, ended.effect);
+  assert.equal(typed.typed, "\u00e9");
+  assert.equal(typed.ok, 1);
+  const after = consumeInput(settleInput(trailed.session), { type: "beforeinput", inputType: "insertText", data: "!" });
+  assert.equal(after.effect.effect, "insert");
+  assert.deepEqual(after.effect.chars, ["!"]);
+});
+
+test("paste and drop do not change the typed text", () => {
+  const start = { typed: "I", sentence: "I love", ok: 1, err: 0 };
+  for (const inputType of ["insertFromPaste", "insertFromDrop", "insertReplacementText"]) {
+    const consumed = consumeInput(emptyInputSession(), { type: "beforeinput", inputType, data: "love" });
+    assert.equal(consumed.effect.effect, "reject");
+    const next = applyTyping(start, consumed.effect);
+    assert.equal(next.changed, false);
+    assert.equal(next.typed, "I");
+    const trailed = consumeInput(consumed.session, { type: "input", inputType, data: "love", value: "love" });
+    assert.equal(trailed.effect.effect, "ignore");
+  }
+});
+
+test("keydown and input do not count the same character twice", () => {
+  let session = emptyInputSession();
+  const key = consumeInput(session, { type: "keydown", key: "a" });
+  assert.equal(key.effect.effect, "ignore");
+  const typed = consumeInput(key.session, { type: "beforeinput", inputType: "insertText", data: "a" });
+  assert.equal(typed.effect.effect, "insert");
+  assert.deepEqual(typed.effect.chars, ["a"]);
+  const again = consumeInput(typed.session, { type: "input", inputType: "insertText", data: "a", value: "a" });
+  assert.equal(again.effect.effect, "ignore");
+  const state = applyTyping({ typed: "", sentence: "a", ok: 0, err: 0 }, typed.effect);
+  assert.equal(state.typed, "a");
+  assert.equal(state.ok, 1);
+  assert.equal(state.steps.length, 1);
+
+  const back = consumeInput(emptyInputSession(), { type: "keydown", key: "Backspace" });
+  assert.equal(back.effect.effect, "backspace");
+  const extra = consumeInput(back.session, { type: "beforeinput", inputType: "deleteContentBackward" });
+  assert.equal(extra.effect.effect, "ignore");
+  const once = applyTyping({ typed: "ab", sentence: "ab", ok: 2, err: 0 }, back.effect);
+  assert.equal(once.typed, "a");
+  const released = consumeInput(settleInput(back.session), { type: "beforeinput", inputType: "deleteContentBackward" });
+  assert.equal(released.effect.effect, "backspace");
+});
+
+test("an input event supplies the character when beforeinput has no data", () => {
+  let session = emptyInputSession();
+  const pending = consumeInput(session, { type: "beforeinput", inputType: "insertText", data: null });
+  assert.equal(pending.effect.effect, "defer");
+  const typed = consumeInput(pending.session, { type: "input", inputType: "insertText", data: null, value: "\u00e9" });
+  assert.deepEqual(typed.effect.chars, ["\u00e9"]);
+  const state = applyTyping({ typed: "", sentence: "\u00e9", ok: 0, err: 0 }, typed.effect);
+  assert.equal(state.ok, 1);
+  assert.equal(state.typed, "\u00e9");
+});
+
+test("the page keeps a signed-in shell independent of config and guards a second start", () => {
+  const src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(src, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\)\]\)/);
+  assert.equal(src.includes("raceTries > 3"), false);
+  assert.match(src, /playLock/);
+  assert.match(src, /nextRaceRetry/);
+  assert.match(src, /role: "alert"/);
+  assert.match(src, /Connection lost, reconnecting\.\.\./);
 });
