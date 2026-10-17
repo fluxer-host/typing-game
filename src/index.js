@@ -1,7 +1,9 @@
 import { board, config, health, me, races } from "./api.js";
 import { callback, devLogin, login, logout } from "./auth.js";
+import { purgeExpiredSessions } from "./db.js";
 import { json } from "./http.js";
 import { Lobby } from "./lobby.js";
+import { websocketOriginAllowed } from "./origin.js";
 import { Race } from "./race.js";
 
 export { Lobby, Race };
@@ -9,6 +11,9 @@ export { Lobby, Race };
 async function websocket(request, env) {
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
     return json({ error: "expected_websocket" }, { status: 426 });
+  }
+  if (!websocketOriginAllowed(request.headers.get("origin"), request.url, env.ALLOWED_ORIGINS)) {
+    return json({ error: "origin" }, { status: 403 });
   }
   const raceId = new URL(request.url).searchParams.get("race");
   if (raceId) {
@@ -39,6 +44,15 @@ export default {
     } catch (error) {
       console.error(error);
       return json({ error: "server_error" }, { status: 500 });
+    }
+  },
+
+  async scheduled(_controller, env) {
+    try {
+      const removed = await purgeExpiredSessions(env);
+      console.log(JSON.stringify({ event: "sessions_purged", removed }));
+    } catch (error) {
+      console.error("session purge failed", error);
     }
   },
 };

@@ -4,7 +4,9 @@ import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { nextMatchAt, nextQueuedAt, normalizeKind, pickGroup } from "./match.js";
 import { isMode } from "./modes.js";
+import { websocketOriginAllowed } from "./origin.js";
 import { publicPlayer } from "./profile.js";
+import { REMATCH_TTL_MS, rematchExpired } from "./retention.js";
 import { pickPassage } from "./sentences.js";
 
 const GATHER_MS = 1500;
@@ -69,6 +71,7 @@ export class Lobby {
     this.env = env;
     this.holding = Object.create(null);
     this.rematchHold = Object.create(null);
+    this.rematchDue = null;
     this.pending = Object.create(null);
   }
 
@@ -214,6 +217,9 @@ export class Lobby {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return json({ error: "expected_websocket" }, { status: 426 });
     }
+    if (!websocketOriginAllowed(request.headers.get("origin"), request.url, this.env.ALLOWED_ORIGINS)) {
+      return json({ error: "origin" }, { status: 403 });
+    }
     const resolved = await resolveUser(request, this.env);
     if (!resolved) return new Response("unauthorized", { status: 401 });
     const player = publicPlayer(resolved.user, this.env);
@@ -311,7 +317,7 @@ export class Lobby {
     if (msg.t === "rematch") {
       const raceId = String(msg.raceId || "");
       if (!/^[0-9a-f-]{36}$/i.test(raceId)) return;
-      const record = await this.ctx.storage.get(`rematch:${raceId}`);
+      const record = await this.loadRematch(raceId);
       const sameSocket = att.lastRace === raceId && (att.status === "matched" || att.status === "rematch");
       const listed = record && record.until >= Date.now() && Array.isArray(record.ids) && record.ids.includes(att.user.id);
       if (!sameSocket && !listed) return this.send(ws, { t: "error", error: "That rematch is closed." });
@@ -493,6 +499,7 @@ export class Lobby {
       const effective = this.holding[key] ? now + GATHER_MS : at;
       if (when == null || effective < when) when = effective;
     }
+    if (this.rematchDue != null && (when == null || this.rematchDue < when)) when = this.rematchDue;
     try {
       if (when == null) await this.ctx.storage.deleteAlarm();
       else await this.ctx.storage.setAlarm(Math.max(when, now + 20));
@@ -501,8 +508,46 @@ export class Lobby {
     }
   }
 
+  async loadRematch(raceId) {
+    const record = await this.ctx.storage.get(`rematch:${raceId}`);
+    if (!record) return null;
+    if (!rematchExpired(record, Date.now())) return record;
+    try {
+      await this.ctx.storage.delete(`rematch:${raceId}`);
+    } catch {
+      // The sweep alarm deletes it again.
+    }
+    return null;
+  }
+
+  async saveRematch(raceId, record) {
+    await this.ctx.storage.put(`rematch:${raceId}`, record);
+    const until = Number(record?.until);
+    if (Number.isFinite(until) && (this.rematchDue == null || until < this.rematchDue)) this.rematchDue = until;
+    await this.armMatchAlarm();
+  }
+
+  async sweepRematches(now) {
+    let next = null;
+    const list = await this.ctx.storage.list({ prefix: "rematch:" });
+    for (const [key, record] of list) {
+      if (rematchExpired(record, now)) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+      const until = Number(record.until);
+      if (next == null || until < next) next = until;
+    }
+    this.rematchDue = next;
+  }
+
   async alarm() {
     const now = Date.now();
+    try {
+      await this.sweepRematches(now);
+    } catch (error) {
+      console.error("rematch sweep failed", error);
+    }
     const known = Object.keys(this.pending);
     const due = known.length
       ? known.filter((key) => this.pending[key] <= now + 25)
@@ -602,13 +647,13 @@ export class Lobby {
         body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked: rated, kind: raceKind, players }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
-      await this.ctx.storage.put(`rematch:${raceId}`, {
+      await this.saveRematch(raceId, {
         mode,
         length: lane,
         ranked: rated,
         kind: raceKind,
         ids: players.map((player) => player.id),
-        until: Date.now() + 180000,
+        until: Date.now() + REMATCH_TTL_MS,
       });
       const match = {
         t: "match",

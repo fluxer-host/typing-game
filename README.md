@@ -56,7 +56,7 @@ The Worker builds the callback from the host the browser called, plus `/auth/cal
 - `https://typing.fluxer.my/auth/callback`
 - `http://127.0.0.1:8787/auth/callback` if you want to try OAuth locally
 
-The site asks only for the `identify` scope. It stores the refresh token so sign-out can revoke the grant. Access tokens last 7 days, refresh tokens 30 days.
+The site asks only for the `identify` scope. It stores the refresh token so sign-out can revoke the grant. Access tokens last 7 days, refresh tokens 30 days. The refresh token is encrypted with AES-GCM before it is written. The key is `TOKEN_ENCRYPTION_KEY`, a Worker secret, not the Fluxer client secret and not `SESSION_SECRET`. Generate it with `openssl rand -base64 32` and set it with `npx wrangler secret put TOKEN_ENCRYPTION_KEY`. Put that key in `.dev.vars` for local OAuth. Rows saved before that key existed are plaintext. The next signed-in request re-encrypts them. If the key is missing, a new login still works and the refresh token is not stored, so sign-out cannot revoke that grant.
 
 Avatars use the hosted instance discovery document (`https://api.fluxer.app/.well-known/fluxer`): `endpoints.media` and `endpoints.static_cdn`. Those bases are `MEDIA_BASE` and `STATIC_CDN` in `wrangler.jsonc`.
 
@@ -79,9 +79,15 @@ npx wrangler secret put FLUXER_CLIENT_ID
 npx wrangler secret put FLUXER_CLIENT_SECRET
 openssl rand -base64 32
 npx wrangler secret put SESSION_SECRET
+openssl rand -base64 32
+npx wrangler secret put TOKEN_ENCRYPTION_KEY
 ```
 
-`FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET` come from the Fluxer application. `SESSION_SECRET` does not. Run `openssl rand -base64 32`, then paste that output when `wrangler secret put SESSION_SECRET` prompts. It signs the login cookie. The Fluxer bot token is not used.
+`FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET` come from the Fluxer application. `SESSION_SECRET` does not. Run `openssl rand -base64 32`, then paste that output when `wrangler secret put SESSION_SECRET` prompts. It signs the login cookie. Run the command again and paste the new output into `TOKEN_ENCRYPTION_KEY`. That key encrypts the refresh token. Use a different value from `SESSION_SECRET`. Set `TOKEN_ENCRYPTION_KEY` before or with the deploy that starts encrypting tokens. The Fluxer bot token is not used.
+
+`ALLOWED_ORIGINS` is optional. WebSocket upgrades already allow the host that received the request. Set this secret or var only to add more origins, as a comma-separated list such as `https://preview.example`. A missing `Origin` header is refused.
+
+The Worker cron `17 * * * *` deletes expired session rows in batches of 100, up to 10 batches per run. Finished race objects keep their storage for 2 minutes after the result is saved, then delete it. Rematch records expire after 3 minutes.
 
 Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://typing.fluxer.my/auth/callback`. Leave it unset and the callback follows the host in the address bar.
 

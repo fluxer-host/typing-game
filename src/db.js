@@ -1,7 +1,9 @@
 import { PAIR_WINDOW_MS } from "./elo.js";
 import { MODE_COLUMNS, isMode } from "./modes.js";
 import { pairCountsFromRows, planRating } from "./rating.js";
+import { SESSION_CLEANUP_BATCH, SESSION_CLEANUP_ROUNDS } from "./retention.js";
 import { countsAsWin } from "./results.js";
+import { sealToken, tokenKeyOk } from "./token-box.js";
 
 function columns(mode) {
   if (!isMode(mode)) throw new Error("bad mode");
@@ -56,12 +58,36 @@ export async function getUsers(env, ids) {
 export async function createSession(env, userId, refreshToken) {
   const id = crypto.randomUUID();
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+  let stored = null;
+  if (refreshToken) {
+    if (!tokenKeyOk(env.TOKEN_ENCRYPTION_KEY)) {
+      console.error("refresh token dropped: TOKEN_ENCRYPTION_KEY missing");
+    } else {
+      stored = await sealToken(refreshToken, env.TOKEN_ENCRYPTION_KEY);
+      if (!stored) console.error("refresh token dropped: encryption failed");
+    }
+  }
   await env.DB.prepare(
     "INSERT INTO sessions (id, user_id, refresh_token, expires_at) VALUES (?, ?, ?, ?)",
   )
-    .bind(id, userId, refreshToken ?? null, expiresAt)
+    .bind(id, userId, stored, expiresAt)
     .run();
   return { id, expiresAt };
+}
+
+// Plaintext rows from before encryption are sealed on the next authenticated
+// request. The compare-and-set leaves a concurrent seal in place.
+export async function upgradeRefreshToken(env, session) {
+  if (!session?.refresh_token || String(session.refresh_token).startsWith("v1:")) return session;
+  if (!tokenKeyOk(env.TOKEN_ENCRYPTION_KEY)) return session;
+  const sealed = await sealToken(session.refresh_token, env.TOKEN_ENCRYPTION_KEY);
+  if (!sealed) return session;
+  await env.DB.prepare(
+    "UPDATE sessions SET refresh_token = ? WHERE id = ? AND refresh_token = ?",
+  )
+    .bind(sealed, session.id, session.refresh_token)
+    .run();
+  return { ...session, refresh_token: sealed };
 }
 
 export async function getSession(env, id) {
@@ -72,17 +98,56 @@ export async function deleteSession(env, id) {
   await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(id).run();
 }
 
-export async function leaderboard(env, mode, limit = 25) {
+export async function leaderboard(env, mode, limit = 25, offset = 0) {
   const cols = columns(mode);
   const result = await env.DB.prepare(
-    `SELECT * FROM users
+    `SELECT id, username, global_name, ${cols.elo}, ${cols.races}, ${cols.wins}, ${cols.best}
+     FROM users
      WHERE ${cols.races} > 0
-     ORDER BY ${cols.elo} DESC, ${cols.best} DESC
-     LIMIT ?`,
+     ORDER BY ${cols.elo} DESC, ${cols.best} DESC, id ASC
+     LIMIT ? OFFSET ?`,
   )
-    .bind(limit)
+    .bind(limit, offset)
     .all();
   return result.results || [];
+}
+
+// Position in the same order as leaderboard(). Null when this ladder has no races.
+export async function leaderboardRank(env, mode, user) {
+  const cols = columns(mode);
+  const races = Number(user[cols.races] || 0);
+  if (races <= 0) return null;
+  const elo = Number(user[cols.elo] ?? 1000);
+  const best = user[cols.best] == null ? null : Number(user[cols.best]);
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS ahead FROM users
+     WHERE ${cols.races} > 0
+       AND (
+         ${cols.elo} > ?
+         OR (${cols.elo} = ? AND COALESCE(${cols.best}, -1) > COALESCE(?, -1))
+         OR (${cols.elo} = ? AND COALESCE(${cols.best}, -1) = COALESCE(?, -1) AND id < ?)
+       )`,
+  )
+    .bind(elo, elo, best, elo, best, user.id)
+    .first();
+  return Number(row?.ahead || 0) + 1;
+}
+
+export async function purgeExpiredSessions(env, now = Date.now()) {
+  let removed = 0;
+  for (let round = 0; round < SESSION_CLEANUP_ROUNDS; round += 1) {
+    const result = await env.DB.prepare(
+      `DELETE FROM sessions WHERE id IN (
+         SELECT id FROM sessions WHERE expires_at < ? LIMIT ?
+       )`,
+    )
+      .bind(now, SESSION_CLEANUP_BATCH)
+      .run();
+    const changes = Number(result?.meta?.changes || 0);
+    removed += changes;
+    if (changes < SESSION_CLEANUP_BATCH) break;
+  }
+  return removed;
 }
 
 export async function recentRaces(env, userId, limit = 12) {

@@ -1,4 +1,4 @@
-import { getSession, getUser } from "./db.js";
+import { getSession, getUser, upgradeRefreshToken } from "./db.js";
 import { readCookie, readPayload, secretOk } from "./session.js";
 
 export async function resolveUser(request, env) {
@@ -11,7 +11,8 @@ export async function resolveUser(request, env) {
   if (!payload?.sid) return null;
   const session = await getSession(env, payload.sid);
   if (!session || session.expires_at < Date.now()) return null;
-  const user = await getUser(env, session.user_id);
+  const current = await upgradeRefreshToken(env, session);
+  const user = await getUser(env, current.user_id);
   if (!user) return null;
-  return { user, session };
+  return { user, session: current };
 }

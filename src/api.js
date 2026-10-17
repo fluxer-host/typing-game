@@ -1,8 +1,9 @@
-import { leaderboard, recentRaces } from "./db.js";
+import { BOARD_CACHE_SECONDS, boardEntry, parseBoardQuery } from "./board.js";
+import { leaderboard, leaderboardRank, recentRaces } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { lengthList } from "./lengths.js";
-import { isMode, MODE_LIST } from "./modes.js";
+import { MODE_LIST } from "./modes.js";
 import { publicPlayer } from "./profile.js";
 import { standingLabel } from "./rating.js";
 
@@ -34,10 +35,23 @@ export async function me(request, env) {
 }
 
 export async function board(request, env) {
-  const mode = new URL(request.url).searchParams.get("mode") || "desktop";
-  if (!isMode(mode)) return json({ error: "mode" }, { status: 400 });
-  const rows = await leaderboard(env, mode, 25);
-  return json({ mode, rows: rows.map((row) => publicPlayer(row, env)) });
+  const parsed = parseBoardQuery(new URL(request.url).searchParams);
+  if (!parsed.ok) return json({ error: parsed.error }, { status: 400 });
+  const resolved = await resolveUser(request, env);
+  const rows = await leaderboard(env, parsed.mode, parsed.limit, parsed.offset);
+  const body = {
+    mode: parsed.mode,
+    limit: parsed.limit,
+    offset: parsed.offset,
+    rows: rows.map((row, index) => boardEntry(row, parsed.mode, parsed.offset + index + 1)),
+  };
+  if (resolved?.user) {
+    body.you = boardEntry(resolved.user, parsed.mode, await leaderboardRank(env, parsed.mode, resolved.user));
+  }
+  const cache = resolved
+    ? `private, max-age=${BOARD_CACHE_SECONDS}`
+    : `public, max-age=${BOARD_CACHE_SECONDS}`;
+  return json(body, { cache });
 }
 
 export async function races(request, env) {

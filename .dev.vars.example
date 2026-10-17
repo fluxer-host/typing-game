@@ -5,6 +5,13 @@
 SESSION_SECRET=replace-with-a-long-random-string
 ALLOW_DEV_LOGIN=true
 
+# Encrypts the Fluxer refresh token at rest. Generate a different value
+# from SESSION_SECRET:
+#   openssl rand -base64 32
+# TOKEN_ENCRYPTION_KEY=
+# Extra WebSocket origins, comma-separated. The request host is always allowed.
+# ALLOWED_ORIGINS=
+
 # Production OAuth. Leave FLUXER_REDIRECT_URI unset so the callback follows
 # the host in the browser. Set it only to force one callback.
 # FLUXER_CLIENT_ID=

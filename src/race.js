@@ -4,9 +4,19 @@ import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { normalizeKind } from "./match.js";
 import { isMode } from "./modes.js";
+import { websocketOriginAllowed } from "./origin.js";
 import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
 import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
 import { buildResults } from "./results.js";
+import {
+  ALARM_COALESCE_MS,
+  PROGRESS_CHECKPOINT_MS,
+  RACE_RETAIN_MS,
+  WAKE_SYNC_MS,
+  raceReadyToPurge,
+  recoverableGap,
+  shouldWriteProgress,
+} from "./retention.js";
 import { passageOk } from "./sentences.js";
 import { wpm } from "./score.js";
 
@@ -26,13 +36,65 @@ export class Race {
     this.env = env;
     this.state = null;
     this.finalizing = false;
+    this.progressDirty = false;
+    this.lastProgressWrite = 0;
+    this.armedFor = null;
+    this.bootedAt = Date.now();
     this.ctx.blockConcurrencyWhile(async () => {
       this.state = (await this.ctx.storage.get("state")) || null;
+      if (this.state?.results && this.state.purgeAt) {
+        try {
+          await this.ctx.storage.setAlarm(Math.max(this.state.purgeAt, Date.now() + 250));
+        } catch {
+          // The stored alarm still fires when it was already set.
+        }
+      }
     });
   }
 
   async persist() {
     await this.ctx.storage.put("state", this.state);
+    this.progressDirty = false;
+    this.lastProgressWrite = Date.now();
+  }
+
+  async noteProgress(reason, now = Date.now()) {
+    if (reason === "progress") this.progressDirty = true;
+    const write = shouldWriteProgress({
+      reason,
+      now,
+      lastWrite: this.lastProgressWrite,
+      checkpointMs: PROGRESS_CHECKPOINT_MS,
+      dirty: this.progressDirty,
+    });
+    if (!write) return false;
+    await this.persist();
+    return true;
+  }
+
+  async schedulePurge() {
+    if (!this.state) return;
+    this.state.purgeAt = Date.now() + RACE_RETAIN_MS;
+    await this.persist();
+    try {
+      await this.ctx.storage.setAlarm(this.state.purgeAt);
+      this.armedFor = this.state.purgeAt;
+    } catch {
+      // A later wake arms the purge from purgeAt.
+    }
+  }
+
+  async purge() {
+    if (!raceReadyToPurge(this.state, Date.now())) return;
+    try {
+      await this.ctx.storage.deleteAll();
+    } catch (error) {
+      console.error("race purge failed", error);
+      return;
+    }
+    this.state = null;
+    this.progressDirty = false;
+    this.armedFor = null;
   }
 
   connectedIds() {
@@ -147,7 +209,12 @@ export class Race {
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/init") return this.init(request);
-    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") return this.join(request);
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      if (!websocketOriginAllowed(request.headers.get("origin"), request.url, this.env.ALLOWED_ORIGINS)) {
+        return json({ error: "origin" }, { status: 403 });
+      }
+      return this.join(request);
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -198,7 +265,7 @@ export class Race {
       saved: false,
       presence: {},
     };
-    await this.persist();
+    await this.noteProgress("start");
     await this.arm();
     return json({ ok: true });
   }
@@ -246,7 +313,7 @@ export class Race {
     const decision = this.decisionState(now);
     const outcome = applyRaceEvent(decision, { type: "reconnect", playerId: id }, now);
     if (outcome.ok) this.storeDecision(outcome.players);
-    await this.persist();
+    await this.noteProgress("reconnect", now);
     server.send(JSON.stringify(this.hello()));
     this.broadcast(this.snapshot());
     await this.settle(outcome.end);
@@ -299,8 +366,18 @@ export class Race {
       kind: msg.t,
     });
     if (!verdict.ok) {
-      this.noteReject(player.id, verdict.reason, verdict.disqualify);
       const sync = { text: progress.text || "", ok: progress.ok || 0, err: progress.err || 0 };
+      if (verdict.reason === "jump" && recoverableGap({
+        previous: sync.text,
+        next: msg.text,
+        bootedAgeMs: now - this.bootedAt,
+        checkpointMs: PROGRESS_CHECKPOINT_MS,
+        wakeMs: WAKE_SYNC_MS,
+      })) {
+        this.send(ws, { t: "sync", ...sync });
+        return;
+      }
+      this.noteReject(player.id, verdict.reason, verdict.disqualify);
       if (verdict.reason === "early") {
         this.send(ws, { t: "wait", serverNow: now, startAt: this.state.startAt, ...sync });
         return;
@@ -308,7 +385,7 @@ export class Race {
       if (verdict.disqualify) {
         progress.dq = true;
         this.state.progress[player.id] = progress;
-        await this.persist();
+        await this.noteProgress("dnf", now);
         this.send(ws, { t: "sync", ...sync });
         this.broadcast(this.snapshot());
         await this.maybeFinish();
@@ -329,7 +406,7 @@ export class Race {
     if (verdict.finished) {
       this.state.finishes[player.id] = { at: now, ok: progress.ok, err: progress.err };
     }
-    await this.persist();
+    await this.noteProgress(verdict.finished ? "finish" : "progress", now);
     this.broadcast(this.snapshot());
     await this.maybeFinish();
     await this.arm();
@@ -363,7 +440,7 @@ export class Race {
     const outcome = applyRaceEvent(decision, { type: "disconnect", playerId: att.id }, now);
     if (!outcome.ok || outcome.players === decision.players) return;
     this.storeDecision(outcome.players);
-    await this.persist();
+    await this.noteProgress("disconnect", now);
     this.broadcast(this.snapshot());
     await this.arm();
   }
@@ -379,7 +456,7 @@ export class Race {
     this.storeDecision(outcome.players);
     const end = raceStanding(outcome.players);
     if (end === "cancel") this.state.results = null;
-    await this.persist();
+    await this.noteProgress("forfeit", now);
     this.broadcast(this.snapshot());
     if (this.state.saved) return;
     // Seal on the alarm so a second forfeit can land before saveRace runs.
@@ -397,12 +474,7 @@ export class Race {
       rows: [],
     };
     this.state.saved = true;
-    await this.persist();
-    try {
-      await this.ctx.storage.deleteAlarm();
-    } catch {
-      // Alarm already gone.
-    }
+    await this.schedulePurge();
     this.broadcast({ t: "results", ...this.state.results });
   }
 
@@ -420,10 +492,16 @@ export class Race {
   async arm() {
     if (!this.state || this.state.results) return;
     const now = Date.now();
-    const when = nextAlarmAt(this.decisionState(now), now);
+    let when = nextAlarmAt(this.decisionState(now), now);
+    if (this.progressDirty) {
+      const due = (this.lastProgressWrite || 0) + PROGRESS_CHECKPOINT_MS;
+      when = Math.min(when, due);
+    }
     const fireAt = when <= now ? now + 250 : when;
+    if (this.armedFor != null && this.armedFor > now && Math.abs(this.armedFor - fireAt) < ALARM_COALESCE_MS) return;
     try {
       await this.ctx.storage.setAlarm(fireAt);
+      this.armedFor = fireAt;
     } catch {
       // The next accepted event arms again.
     }
@@ -435,11 +513,15 @@ export class Race {
 
   async alarm() {
     if (!this.state) return;
+    const now = Date.now();
+    if (raceReadyToPurge(this.state, now)) {
+      await this.purge();
+      return;
+    }
     if (this.state.results) {
       if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
       return;
     }
-    const now = Date.now();
     const limitAt = this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS);
     if (now >= limitAt) {
       const standing = this.currentEnd(now);
@@ -453,7 +535,8 @@ export class Race {
     const decision = this.decisionState(now);
     const outcome = applyRaceEvent(decision, { type: "tick" }, now);
     if (outcome.ok) this.storeDecision(outcome.players);
-    await this.persist();
+    if (outcome.notices.length || outcome.end) await this.noteProgress("dnf", now);
+    else if (this.progressDirty) await this.noteProgress("progress", now);
     if (outcome.notices.length) this.broadcast(this.snapshot());
     if (outcome.end === "cancel") {
       await this.cancel();
@@ -504,12 +587,7 @@ export class Race {
         });
       }
       this.state.saved = true;
-      await this.persist();
-      try {
-        await this.ctx.storage.deleteAlarm();
-      } catch {
-        // The results are already stored.
-      }
+      await this.schedulePurge();
       this.broadcast({ t: "results", ...this.state.results });
     } catch (error) {
       console.error("save race failed", error);

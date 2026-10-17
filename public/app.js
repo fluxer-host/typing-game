@@ -76,6 +76,7 @@ const state = {
   me: null,
   recent: [],
   board: [],
+  boardYou: null,
   mode: localStorage.getItem("tg_mode") || "desktop",
   length: localStorage.getItem("tg_length") || "sprint",
   phase: "lobby",
@@ -1446,7 +1447,9 @@ function renderSide() {
     you.append(h("p", { class: "empty", text: "Sign in to take a ladder spot." }));
   } else {
     const best = state.me.best?.[state.mode];
-    you.append(h("p", { text: `${Math.round(modeElo() ?? 1000)} elo` }));
+    const place = state.boardYou?.rank;
+    const eloLine = `${Math.round(modeElo() ?? 1000)} elo`;
+    you.append(h("p", { text: place ? `${eloLine} · rank ${place}` : eloLine }));
     you.append(h("p", { class: "muted", text: `${state.me.wins?.[state.mode] || 0} wins · ${state.me.races?.[state.mode] || 0} rated` }));
     you.append(h("p", { class: "muted", text: best ? `Best ${best} wpm` : "No finished race yet" }));
   }
@@ -1456,8 +1459,9 @@ function renderSide() {
   else if (!state.board.length) board.append(h("p", { class: "empty", text: "No rated races yet." }));
   for (const [index, row] of state.board.entries()) {
     const line = h("div", { class: "board-row" });
-    line.append(h("b", { text: `${index + 1}. ${row.name}` }));
-    line.append(h("span", { text: String(Math.round(row.elo?.[state.mode] ?? 1000)) }));
+    const place = row.rank || index + 1;
+    line.append(h("b", { text: `${place}. ${row.name}` }));
+    line.append(h("span", { text: String(Math.round(row.rating ?? row.elo?.[state.mode] ?? 1000)) }));
     board.append(line);
   }
   const recent = document.getElementById("recent");
@@ -2339,9 +2343,11 @@ async function pullBoard() {
   if (mode !== state.mode) return;
   if (result.ok) {
     state.board = result.data?.rows || [];
+    state.boardYou = result.data?.you || null;
     state.boardError = "";
     clearRetry("board");
   } else {
+    state.boardYou = null;
     state.boardError = "The ladder did not load.";
     if (shouldAutoRetry(result.status)) scheduleRetry("board", () => pullBoard());
   }

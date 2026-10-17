@@ -1,4 +1,5 @@
 import { createSession, deleteSession, upsertUser } from "./db.js";
+import { openToken } from "./token-box.js";
 import { json, redirect, sameOrigin } from "./http.js";
 import { publicPlayer } from "./profile.js";
 import {
@@ -149,9 +150,10 @@ export async function logout(request, env) {
   const resolved = await resolveUser(request, env);
   if (resolved?.session) {
     await deleteSession(env, resolved.session.id);
-    if (resolved.session.refresh_token && oauthReady(env)) {
+    const opened = await openToken(resolved.session.refresh_token, env.TOKEN_ENCRYPTION_KEY);
+    if (opened.token && oauthReady(env)) {
       const body = new URLSearchParams({
-        token: resolved.session.refresh_token,
+        token: opened.token,
         token_type_hint: "refresh_token",
         client_id: env.FLUXER_CLIENT_ID,
         client_secret: env.FLUXER_CLIENT_SECRET,
