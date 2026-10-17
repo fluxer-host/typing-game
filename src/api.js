@@ -4,6 +4,7 @@ import { resolveUser } from "./identity.js";
 import { lengthList } from "./lengths.js";
 import { isMode, MODE_LIST } from "./modes.js";
 import { publicPlayer } from "./profile.js";
+import { standingLabel } from "./rating.js";
 
 export function config(env) {
   return json({
@@ -49,6 +50,8 @@ export async function races(request, env) {
       mode: row.mode,
       sentence: row.sentence,
       ranked: Boolean(row.ranked),
+      racers: Number(row.racers) || 0,
+      label: standingLabel({ ranked: Boolean(row.ranked), racers: Number(row.racers) || 0 }),
       finishedAt: row.finished_at,
       place: row.place,
       wpm: row.wpm,

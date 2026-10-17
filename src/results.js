@@ -50,6 +50,12 @@ function ordered(state) {
   return rows.map((row, index) => ({ ...row, place: index + 1 }));
 }
 
+function raceKind(state, rowCount) {
+  if (state.kind === "room" || state.kind === "practice" || state.kind === "queue") return state.kind;
+  if (state.ranked) return "queue";
+  return rowCount >= 2 ? "room" : "practice";
+}
+
 export function buildResults(state, now) {
   const rows = ordered(state);
   const rated = Boolean(state.ranked) && rows.length >= 2;
@@ -59,6 +65,7 @@ export function buildResults(state, now) {
   return {
     cancelled: false,
     ranked: Boolean(state.ranked),
+    kind: raceKind(state, rows.length),
     mode: state.mode,
     sentence: state.sentence,
     rows: rows.map((row) => {
@@ -83,6 +90,7 @@ export function buildResults(state, now) {
         accuracy: typed > 0 ? accuracy(row.ok, row.err) : row.finished ? 100 : 0,
         ms: row.finished ? end - state.startAt : null,
         progress: chars,
+        dq: row.dq,
         eloBefore: state.ranked ? before : null,
         eloAfter: rated ? after : null,
       };

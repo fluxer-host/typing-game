@@ -2,6 +2,7 @@ import { getUsers } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
+import { nextMatchAt, nextQueuedAt, normalizeKind, pickGroup } from "./match.js";
 import { isMode } from "./modes.js";
 import { publicPlayer } from "./profile.js";
 import { pickPassage } from "./sentences.js";
@@ -10,6 +11,11 @@ const GATHER_MS = 1500;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const ROOM_LIMIT = 6;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Only the ranked queue writes Elo. Practice and private rooms do not.
+export function rankedFor(kind) {
+  return kind === "queue";
+}
 
 export function summarizeRooms(entries) {
   const groups = new Map();
@@ -63,6 +69,7 @@ export class Lobby {
     this.env = env;
     this.holding = Object.create(null);
     this.rematchHold = Object.create(null);
+    this.pending = Object.create(null);
   }
 
   sockets() {
@@ -121,7 +128,8 @@ export class Lobby {
       this.rematchHold[raceId] = true;
       let launched = false;
       try {
-        launched = await this.launch(ready, mode, length, Boolean(ready[0].att.ranked));
+        const kind = normalizeKind(ready[0].att.kind, ready[0].att.ranked, ready.length);
+        launched = await this.launch(ready, mode, length, rankedFor(kind), kind);
       } finally {
         this.rematchHold[raceId] = false;
       }
@@ -140,14 +148,22 @@ export class Lobby {
   announce(mode, length) {
     const lane = readLength(length);
     const waiting = this.queued(mode, lane);
+    const now = Date.now();
+    const group = pickGroup(waiting.map((entry) => ({
+      userId: entry.att.user?.id,
+      elo: Number(entry.att.user?.elo?.[mode] ?? 1000),
+      queuedAt: Number.isFinite(Number(entry.att.queuedAt)) ? Number(entry.att.queuedAt) : 0,
+    })), now, 4);
+    const matching = Boolean(group && group.length >= 2);
     for (const entry of waiting) {
       this.send(entry.ws, {
         t: "queued",
         mode,
         length: lane,
         waiting: waiting.length,
-        serverNow: Date.now(),
-        gatherMs: waiting.length >= 2 ? GATHER_MS : null,
+        serverNow: now,
+        gatherMs: matching ? GATHER_MS : null,
+        matching,
       });
     }
   }
@@ -257,15 +273,26 @@ export class Lobby {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
       const previousRoom = att.status === "room" ? att.room : null;
       const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
+      const lane = readLength(msg.length);
+      const queuedAt = nextQueuedAt(
+        { ...att, length: readLength(att.length) },
+        msg.mode,
+        lane,
+        Date.now(),
+      );
       await this.releaseGroup(ws, att);
       att.status = "queue";
       att.mode = msg.mode;
-      att.length = readLength(msg.length);
+      att.length = lane;
+      att.queuedAt = queuedAt;
       att.room = null;
       att.host = false;
       ws.serializeAttachment(att);
       if (previousRoom) this.emitRoom(previousRoom);
-      if (previous && (previous.mode !== att.mode || previous.length !== att.length)) this.announce(previous.mode, previous.length);
+      if (previous && (previous.mode !== att.mode || previous.length !== att.length)) {
+        this.announce(previous.mode, previous.length);
+        await this.pokeLane(previous.mode, previous.length);
+      }
       this.announce(att.mode, att.length);
       await this.consider(att.mode, att.length);
       return;
@@ -277,7 +304,7 @@ export class Lobby {
       att.mode = msg.mode;
       att.length = readLength(msg.length);
       ws.serializeAttachment(att);
-      await this.launch([{ ws, att }], att.mode, att.length, false);
+      await this.launch([{ ws, att }], att.mode, att.length, rankedFor("practice"), "practice");
       return;
     }
 
@@ -293,6 +320,7 @@ export class Lobby {
         att.mode = record.mode;
         att.length = readLength(record.length);
         att.ranked = Boolean(record.ranked);
+        att.kind = normalizeKind(record.kind, record.ranked, record.ids?.length || 0);
       }
       const previousRoom = att.status === "room" ? att.room : null;
       const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
@@ -302,7 +330,10 @@ export class Lobby {
       att.host = false;
       ws.serializeAttachment(att);
       if (previousRoom) this.emitRoom(previousRoom);
-      if (previous) this.announce(previous.mode, previous.length);
+      if (previous) {
+        this.announce(previous.mode, previous.length);
+        await this.pokeLane(previous.mode, previous.length);
+      }
       await this.syncRematch(raceId);
       return;
     }
@@ -361,7 +392,7 @@ export class Lobby {
         this.send(ws, { t: "error", error: "Need two racers in the room." });
         return;
       }
-      await this.launch(members, att.mode, readLength(att.length), true);
+      await this.launch(members, att.mode, readLength(att.length), rankedFor("room"), "room");
       return;
     }
 
@@ -374,7 +405,10 @@ export class Lobby {
       att.host = false;
       ws.serializeAttachment(att);
       if (previousRoom) this.emitRoom(previousRoom);
-      if (previous) this.announce(previous.mode, previous.length);
+      if (previous) {
+        this.announce(previous.mode, previous.length);
+        await this.pokeLane(previous.mode, previous.length);
+      }
     }
   }
 
@@ -382,7 +416,11 @@ export class Lobby {
     const att = ws.deserializeAttachment();
     if (!att?.user) return;
     if (att.status === "room" && att.room) this.emitRoom(att.room);
-    if (att.status === "queue" && att.mode) this.announce(att.mode, readLength(att.length));
+    if (att.status === "queue" && att.mode) {
+      const lane = readLength(att.length);
+      this.announce(att.mode, lane);
+      await this.pokeLane(att.mode, lane);
+    }
     if (att.lastRace && (att.status === "matched" || att.status === "rematch")) await this.syncRematch(att.lastRace);
   }
 
@@ -390,33 +428,153 @@ export class Lobby {
     return `${mode}:${readLength(length)}`;
   }
 
+  splitLane(key) {
+    const index = String(key).indexOf(":");
+    if (index < 0) return ["", ""];
+    return [key.slice(0, index), key.slice(index + 1)];
+  }
+
+  queuedLanes() {
+    const keys = new Set();
+    for (const entry of this.sockets()) {
+      if (entry.att.status === "queue" && isMode(entry.att.mode)) keys.add(this.laneKey(entry.att.mode, entry.att.length));
+    }
+    return [...keys];
+  }
+
+  async queueRecords(mode, lane) {
+    const waiting = this.queued(mode, lane);
+    if (!waiting.length) return [];
+    let byId = new Map();
+    try {
+      const ids = [...new Set(waiting.map((entry) => entry.att.user.id))];
+      const rows = await getUsers(this.env, ids);
+      byId = new Map(rows.map((row) => [row.id, row]));
+    } catch (error) {
+      console.error("queue ratings failed", error);
+    }
+    return waiting.map((entry) => {
+      const row = byId.get(entry.att.user.id);
+      if (row) {
+        entry.att.user = publicPlayer(row, this.env);
+        entry.ws.serializeAttachment(entry.att);
+      }
+      return {
+        userId: entry.att.user.id,
+        elo: Number(entry.att.user?.elo?.[mode] ?? 1000),
+        queuedAt: Number.isFinite(Number(entry.att.queuedAt)) ? Number(entry.att.queuedAt) : 0,
+        entry,
+      };
+    });
+  }
+
+  async pokeLane(mode, length) {
+    if (!isMode(mode)) return;
+    const key = this.laneKey(mode, length);
+    if (this.holding[key]) return;
+    const at = Date.now() + 40;
+    if (this.pending[key] == null || this.pending[key] > at) this.pending[key] = at;
+    await this.armMatchAlarm();
+  }
+
+  planWindow(mode, lane, records) {
+    const key = this.laneKey(mode, lane);
+    const now = Date.now();
+    const at = nextMatchAt(records, now);
+    if (at == null || at <= now) delete this.pending[key];
+    else this.pending[key] = at;
+    return this.armMatchAlarm();
+  }
+
+  async armMatchAlarm() {
+    const now = Date.now();
+    let when = null;
+    for (const [key, at] of Object.entries(this.pending)) {
+      const effective = this.holding[key] ? now + GATHER_MS : at;
+      if (when == null || effective < when) when = effective;
+    }
+    try {
+      if (when == null) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(Math.max(when, now + 20));
+    } catch {
+      // The next queue or leave message arms the clock again.
+    }
+  }
+
+  async alarm() {
+    const now = Date.now();
+    const known = Object.keys(this.pending);
+    const due = known.length
+      ? known.filter((key) => this.pending[key] <= now + 25)
+      : this.queuedLanes();
+    for (const key of due) {
+      if (this.holding[key]) continue;
+      delete this.pending[key];
+      const [mode, length] = this.splitLane(key);
+      if (!isMode(mode) || !isLength(length)) continue;
+      await this.consider(mode, length);
+    }
+    await this.armMatchAlarm();
+  }
+
   async consider(mode, length) {
+    if (!isMode(mode)) return;
     const lane = readLength(length);
     const key = this.laneKey(mode, lane);
     if (this.holding[key]) return;
-    const ready = this.queued(mode, lane);
-    if (ready.length >= 4) {
-      const launched = await this.launch(ready.slice(0, 4), mode, lane, true);
-      if (launched && this.queued(mode, lane).length >= 2) await this.consider(mode, lane);
-      return;
-    }
-    if (ready.length < 2) return;
     this.holding[key] = true;
     let launched = false;
+    let attempted = false;
+    let records = [];
     try {
-      await delay(GATHER_MS);
-      const gathered = this.queued(mode, lane);
-      if (gathered.length >= 2) launched = await this.launch(gathered.slice(0, 4), mode, lane, true);
+      records = await this.queueRecords(mode, lane);
+      this.announce(mode, lane);
+      const group = pickGroup(records, Date.now(), 4);
+      const members = (group || []).map((item) => item.entry).filter((entry) => entry?.ws?.readyState === WebSocket.OPEN);
+      if (members.length >= 4) {
+        delete this.pending[key];
+        attempted = true;
+        launched = await this.launch(members.slice(0, 4), mode, lane, rankedFor("queue"), "queue");
+      } else if (members.length >= 2) {
+        delete this.pending[key];
+        attempted = true;
+        await delay(GATHER_MS);
+        const again = await this.queueRecords(mode, lane);
+        const gathered = pickGroup(again, Date.now(), 4);
+        const ready = (gathered || []).map((item) => item.entry).filter((entry) => entry?.ws?.readyState === WebSocket.OPEN);
+        if (ready.length >= 2) launched = await this.launch(ready, mode, lane, rankedFor("queue"), "queue");
+        records = again;
+      }
     } finally {
       this.holding[key] = false;
     }
-    if (launched && this.queued(mode, lane).length >= 2) await this.consider(mode, lane);
+    const left = launched || attempted ? await this.queueRecords(mode, lane) : records;
+    if (launched && left.length >= 2) {
+      await this.consider(mode, lane);
+      return;
+    }
+    if (!launched && attempted && pickGroup(left, Date.now(), 4)) {
+      this.pending[key] = Date.now() + 2000;
+      await this.armMatchAlarm();
+      return;
+    }
+    await this.planWindow(mode, lane, left);
   }
 
-  async launch(members, mode, length, ranked) {
-    const live = members.filter((entry) => entry.ws.readyState === WebSocket.OPEN);
+  async launch(members, mode, length, ranked, kind) {
+    const open = members.filter((entry) => entry.ws.readyState === WebSocket.OPEN);
+    const seen = new Set();
+    const live = [];
+    for (const entry of open) {
+      const id = entry.att?.user?.id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      live.push(entry);
+    }
     if (!live.length) return false;
-    if (ranked && live.length < 2) return false;
+    const raceKind = normalizeKind(kind, ranked, live.length);
+    const rated = rankedFor(raceKind);
+    if (rated && live.length < 2) return false;
     const previous = live.map((entry) => entry.att.status);
     for (const entry of live) {
       entry.att.status = "matched";
@@ -441,13 +599,14 @@ export class Lobby {
       const response = await stub.fetch("https://race.internal/init", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked, players }),
+        body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked: rated, kind: raceKind, players }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
       await this.ctx.storage.put(`rematch:${raceId}`, {
         mode,
         length: lane,
-        ranked: Boolean(ranked),
+        ranked: rated,
+        kind: raceKind,
         ids: players.map((player) => player.id),
         until: Date.now() + 180000,
       });
@@ -459,14 +618,16 @@ export class Lobby {
         serverNow: Date.now(),
         mode,
         length: lane,
-        ranked,
+        ranked: rated,
+        kind: raceKind,
         players,
       };
       for (const entry of live) {
         entry.att.lastRace = raceId;
         entry.att.mode = mode;
         entry.att.length = lane;
-        entry.att.ranked = Boolean(ranked);
+        entry.att.ranked = rated;
+        entry.att.kind = raceKind;
         entry.att.status = "matched";
         entry.ws.serializeAttachment(entry.att);
         this.send(entry.ws, match);

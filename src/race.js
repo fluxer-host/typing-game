@@ -2,6 +2,7 @@ import { saveRace } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { isLength, LENGTHS } from "./lengths.js";
+import { normalizeKind } from "./match.js";
 import { isMode } from "./modes.js";
 import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
 import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
@@ -179,12 +180,15 @@ export class Race {
     }
     const startAt = Number(body.startAt);
     if (!Number.isFinite(startAt)) return json({ error: "start" }, { status: 400 });
+    const kind = normalizeKind(body.kind, Boolean(body.ranked), players.length);
+    const ranked = kind === "queue";
     this.state = {
       raceId: String(body.raceId),
       mode: body.mode,
       length,
       limitMs,
-      ranked: Boolean(body.ranked),
+      ranked,
+      kind,
       sentence: body.sentence,
       startAt,
       players,
@@ -209,6 +213,7 @@ export class Race {
       mode: this.state.mode,
       length: this.state.length || "sprint",
       ranked: this.state.ranked,
+      kind: this.state.kind || normalizeKind(null, this.state.ranked, this.state.players.length),
       players: this.state.players,
       progress: viewProgress(this.state.progress),
       finishes: this.state.finishes,
@@ -469,18 +474,19 @@ export class Race {
     this.state.finishedAt = finishedAt;
     await this.persist();
     await this.writeResults();
-    this.broadcast({ t: "results", ...this.state.results });
+    if (!this.state?.saved) this.broadcast({ t: "results", ...this.state.results });
   }
 
   async writeResults() {
-    if (!this.state?.results || this.state.results.cancelled || this.state.saved) return;
+    if (!this.state?.results || this.state.results.cancelled || this.state.saved || this.writing) return;
     if (this.currentEnd() === "cancel") {
       this.state.results = null;
       await this.cancel();
       return;
     }
+    this.writing = true;
     try {
-      await saveRace(this.env, {
+      const saved = await saveRace(this.env, {
         id: this.state.raceId,
         mode: this.state.mode,
         sentence: this.state.sentence,
@@ -489,9 +495,22 @@ export class Race {
         finishedAt: this.state.finishedAt || Date.now(),
         rows: this.state.results.rows,
       });
+      if (saved?.rows && this.state.results?.rows) {
+        const byId = new Map(saved.rows.map((row) => [row.id, row]));
+        this.state.results.rows = this.state.results.rows.map((row) => {
+          const next = byId.get(row.id);
+          if (!next) return row;
+          return { ...row, eloBefore: next.eloBefore ?? null, eloAfter: next.eloAfter ?? null };
+        });
+      }
       this.state.saved = true;
       await this.persist();
-      await this.ctx.storage.deleteAlarm();
+      try {
+        await this.ctx.storage.deleteAlarm();
+      } catch {
+        // The results are already stored.
+      }
+      this.broadcast({ t: "results", ...this.state.results });
     } catch (error) {
       console.error("save race failed", error);
       try {
@@ -499,6 +518,8 @@ export class Race {
       } catch {
         // Retry on the next message instead.
       }
+    } finally {
+      this.writing = false;
     }
   }
 }

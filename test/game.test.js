@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
-import { applyElo, eloDeltas } from "../src/elo.js";
+import { applyElo, eloDelta, eloDeltas, expectedScore, PAIR_RATED_LIMIT, PAIR_WINDOW_MS, pairFactor, pairKey } from "../src/elo.js";
 import { MODE_COLUMNS } from "../src/modes.js";
 import { applyRaceEvent, IDLE_MS, nextAlarmAt, RECONNECT_GRACE_MS, resultsHeadline } from "../src/race-end.js";
 import { buildResults, countsAsWin } from "../src/results.js";
@@ -9,7 +9,21 @@ import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
 import { LENGTHS, lengthList } from "../src/lengths.js";
 import { validateProgress } from "../src/progress.js";
-import { summarizeRooms } from "../src/lobby.js";
+import { rankedFor, summarizeRooms } from "../src/lobby.js";
+import {
+  MATCH_WINDOW_CAP,
+  MATCH_WINDOW_INTERVAL_MS,
+  MATCH_WINDOW_START,
+  MATCH_WINDOW_STEP,
+  matchWindow,
+  nextMatchAt,
+  nextQueuedAt,
+  pickGroup,
+  pickOpponent,
+  waitForWindow,
+} from "../src/match.js";
+import { commitRating, pairCountsFromRows, planRating, standingLabel } from "../src/rating.js";
+import { saveStatements } from "../src/db.js";
 import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
 import {
   applyTyping,
@@ -874,4 +888,254 @@ test("the page keeps a signed-in shell independent of config and guards a second
   assert.match(src, /nextRaceRetry/);
   assert.match(src, /role: "alert"/);
   assert.match(src, /Connection lost, reconnecting\.\.\./);
+  assert.match(src, /Unranked/);
+});
+
+function duelRows() {
+  return [
+    { id: "a", place: 1, wpm: 80, accuracy: 100, ms: 5000, progress: 13, finished: true, outcome: "finished", dq: false },
+    { id: "b", place: 2, wpm: 60, accuracy: 100, ms: 8000, progress: 13, finished: true, outcome: "finished", dq: false },
+  ];
+}
+
+test("private rooms are unranked and practice stays a solo unrated race", () => {
+  assert.equal(rankedFor("room"), false);
+  assert.equal(rankedFor("practice"), false);
+  assert.equal(rankedFor("queue"), true);
+  const room = buildResults(
+    {
+      ranked: false,
+      kind: "room",
+      mode: "desktop",
+      sentence: "I love Fluxer",
+      startAt: 0,
+      players: [
+        { id: "a", name: "Ada", tag: "ada", eloAtStart: 1200 },
+        { id: "b", name: "Bea", tag: "bea", eloAtStart: 1400 },
+      ],
+      finishes: {
+        a: { at: 4000, ok: 13, err: 0 },
+        b: { at: 5000, ok: 13, err: 0 },
+      },
+      progress: {},
+    },
+    5000,
+  );
+  assert.equal(room.ranked, false);
+  assert.equal(room.kind, "room");
+  assert.equal(room.rows[0].eloBefore, null);
+  assert.equal(room.rows[0].eloAfter, null);
+  assert.equal(room.rows[1].eloAfter, null);
+  const plan = planRating(room.rows, { ranked: false, elos: { a: 1200, b: 1400 }, pairCounts: {} });
+  assert.deepEqual(plan.map((row) => row.delta), [0, 0]);
+  assert.equal(plan.every((row) => row.countRace === false), true);
+  assert.equal(standingLabel({ ranked: false, racers: 2 }), "Unranked");
+  assert.equal(standingLabel({ ranked: false, kind: "room", racers: 0 }), "Unranked");
+  assert.equal(standingLabel({ ranked: false, racers: 1 }), "practice");
+  assert.equal(standingLabel({ ranked: true, racers: 2 }), "rated");
+});
+
+test("expected score and a single pair use the same 400-point curve", () => {
+  assert.equal(expectedScore(1000, 1000), 0.5);
+  assert.ok(Math.abs(expectedScore(1200, 1000) - (1 / (1 + 10 ** (-200 / 400)))) < 1e-12);
+  const swing = eloDelta({ id: "a", elo: 1000, place: 1 }, { id: "b", elo: 1000, place: 2 });
+  assert.equal(swing, 16);
+  assert.equal(PAIR_WINDOW_MS, 60 * 60 * 1000);
+  assert.equal(PAIR_RATED_LIMIT, 2);
+  assert.equal(pairFactor(0), 1);
+  assert.equal(pairFactor(1), 1);
+  assert.equal(pairFactor(2), 0);
+  assert.equal(pairFactor(9), 0);
+});
+
+test("a repeated pair stops moving elo while a new opponent still does", () => {
+  const rows = [
+    { id: "a", place: 1, dq: false, ms: 1, finished: true, outcome: "finished" },
+    { id: "b", place: 2, dq: false, ms: 2, finished: true, outcome: "finished" },
+    { id: "c", place: 3, dq: false, ms: null, finished: false, outcome: "dnf" },
+  ];
+  const open = planRating(rows, { ranked: true, elos: { a: 1000, b: 1000, c: 1000 }, pairCounts: {} });
+  assert.equal(open.find((row) => row.id === "a").delta, 16);
+  assert.equal(open.find((row) => row.id === "b").delta, 0);
+  assert.equal(open.find((row) => row.id === "c").delta, -16);
+  const capped = planRating(rows, {
+    ranked: true,
+    elos: { a: 1000, b: 1000, c: 1000 },
+    pairCounts: { [pairKey("a", "b")]: PAIR_RATED_LIMIT },
+  });
+  assert.equal(capped.find((row) => row.id === "a").delta, 8);
+  assert.equal(capped.find((row) => row.id === "b").delta, 8);
+  assert.equal(capped.find((row) => row.id === "c").delta, -16);
+  const history = pairCountsFromRows([
+    { raceId: "r1", userId: "a" },
+    { raceId: "r1", userId: "b" },
+    { raceId: "r2", userId: "a" },
+    { raceId: "r2", userId: "b" },
+    { raceId: "r3", userId: "a" },
+    { raceId: "r3", userId: "c" },
+  ], ["a", "b", "c"]);
+  assert.equal(history[pairKey("b", "a")], 2);
+  assert.equal(history[pairKey("a", "c")], 1);
+  assert.equal(history[pairKey("b", "c")], 0);
+});
+
+test("the rating window starts at 100 and then matches anyone", () => {
+  assert.equal(MATCH_WINDOW_START, 100);
+  assert.equal(MATCH_WINDOW_STEP, 50);
+  assert.equal(MATCH_WINDOW_INTERVAL_MS, 5000);
+  assert.equal(MATCH_WINDOW_CAP, 400);
+  assert.equal(matchWindow(0), 100);
+  assert.equal(matchWindow(4999), 100);
+  assert.equal(matchWindow(5000), 150);
+  assert.equal(matchWindow(20000), 300);
+  assert.equal(matchWindow(29999), 350);
+  assert.equal(matchWindow(30000), Infinity);
+  assert.equal(waitForWindow(80), 0);
+  assert.equal(waitForWindow(300), 20000);
+  assert.equal(waitForWindow(5000), 30000);
+});
+
+test("matchmaking prefers a close opponent and widens with the longer wait", () => {
+  const me = { userId: "a", elo: 1000, queuedAt: 0 };
+  const near = { userId: "b", elo: 1090, queuedAt: 0 };
+  const far = { userId: "c", elo: 1200, queuedAt: 0 };
+  assert.equal(pickOpponent([me, near, far], me, 0).userId, "b");
+  assert.equal(pickOpponent([me, far], me, 0), null);
+  assert.equal(pickOpponent([me, far], me, 10000).userId, "c");
+  const late = { userId: "c", elo: 1200, queuedAt: 10000 };
+  assert.equal(pickOpponent([me, late], me, 10000).userId, "c");
+  assert.equal(pickOpponent([late], { ...me, queuedAt: 10000 }, 10000), null);
+  const group = pickGroup([
+    { userId: "far", elo: 1000, queuedAt: 0 },
+    { userId: "b", elo: 2000, queuedAt: 1000 },
+    { userId: "c", elo: 2010, queuedAt: 1000 },
+  ], 1000, 4);
+  assert.deepEqual(group.map((row) => row.userId), ["b", "c"]);
+});
+
+test("a player cannot match their other tab, and a wide gap still starts", () => {
+  const twin = [
+    { userId: "a", elo: 1000, queuedAt: 0 },
+    { userId: "a", elo: 1000, queuedAt: 50 },
+  ];
+  assert.equal(pickOpponent(twin, twin[0], 0), null);
+  assert.equal(pickGroup(twin, 0), null);
+  const mixed = pickGroup([...twin, { userId: "b", elo: 1000, queuedAt: 10 }], 0, 4);
+  assert.deepEqual(mixed.map((row) => row.userId).sort(), ["a", "b"]);
+  const apart = [
+    { userId: "a", elo: 1000, queuedAt: 0 },
+    { userId: "b", elo: 9000, queuedAt: 0 },
+  ];
+  assert.equal(pickOpponent(apart, apart[0], 0), null);
+  assert.equal(pickGroup(apart, 29999), null);
+  assert.equal(pickOpponent(apart, apart[0], 30000).userId, "b");
+  assert.equal(pickGroup(apart, 30000).length, 2);
+  assert.equal(nextQueuedAt({ status: "queue", mode: "desktop", length: "sprint", queuedAt: 50 }, "desktop", "sprint", 90), 50);
+  assert.equal(nextQueuedAt({ status: "queue", mode: "desktop", length: "sprint", queuedAt: 50 }, "mobile", "sprint", 90), 90);
+  assert.equal(nextQueuedAt({ status: "idle", mode: "desktop", length: "sprint", queuedAt: 50 }, "desktop", "sprint", 90), 90);
+});
+
+test("the next match time agrees with the window and does not starve a pair", () => {
+  const queue = [
+    { userId: "a", elo: 1000, queuedAt: 0 },
+    { userId: "b", elo: 1300, queuedAt: 0 },
+  ];
+  assert.equal(nextMatchAt(queue, 0), 20000);
+  assert.equal(pickGroup(queue, 19999), null);
+  assert.equal(pickGroup(queue, 20000).length, 2);
+  assert.equal(nextMatchAt([{ userId: "a", elo: 1000, queuedAt: 5 }], 5), null);
+  const clocks = [0, 4999, 5000, 20000, 30000, 60000];
+  const samples = [
+    queue,
+    [
+      { userId: "a", elo: 1000, queuedAt: 0 },
+      { userId: "b", elo: 1000, queuedAt: 0 },
+      { userId: "c", elo: 2500, queuedAt: 1000 },
+    ],
+    [
+      { userId: "a", elo: 1500, queuedAt: 10 },
+      { userId: "a", elo: 1500, queuedAt: 99 },
+      { userId: "b", elo: 1900, queuedAt: 10 },
+    ],
+  ];
+  for (const sample of samples) {
+    for (const now of clocks) {
+      const group = pickGroup(sample, now);
+      const at = nextMatchAt(sample, now);
+      if (group) assert.ok(at <= now, `matched pair still waiting at ${now}`);
+      else assert.ok(at > now, `unmatched pair has no later time at ${now}`);
+    }
+  }
+});
+
+test("overlapping races both add and the same race applies once", () => {
+  const plan = planRating(duelRows(), { ranked: true, elos: { a: 1000, b: 1000 }, pairCounts: {} });
+  assert.equal(plan.find((row) => row.id === "a").delta, 16);
+  assert.equal(plan.find((row) => row.id === "b").delta, -16);
+  const fresh = { users: { a: { desktop: { elo: 1000, races: 0, wins: 0 }, mobile: { elo: 1000, races: 0, wins: 0 } }, b: { desktop: { elo: 1000, races: 0, wins: 0 } } }, applied: [] };
+  const once = commitRating(fresh, plan, "race-1", "desktop");
+  assert.equal(once.users.a.desktop.elo, 1016);
+  assert.equal(once.users.a.desktop.races, 1);
+  assert.equal(once.users.a.desktop.wins, 1);
+  assert.equal(once.users.b.desktop.elo, 984);
+  assert.equal(once.users.a.mobile.elo, 1000);
+  const twice = commitRating(once, plan, "race-1", "desktop");
+  assert.equal(twice.users.a.desktop.elo, 1016);
+  assert.equal(twice.users.a.desktop.races, 1);
+  const both = commitRating(twice, plan, "race-2", "desktop");
+  assert.equal(both.users.a.desktop.elo, 1032);
+  assert.equal(both.users.b.desktop.elo, 968);
+  assert.equal(both.users.a.desktop.races, 2);
+  const absolute = { a: 1016, b: 984 };
+  for (const row of plan) absolute[row.id] = row.eloAfter;
+  assert.equal(absolute.a, 1016);
+  assert.equal(both.users.a.desktop.elo, 1032);
+  const low = commitRating(
+    { users: { a: { desktop: { elo: 100, races: 0, wins: 0 } }, b: { desktop: { elo: 100, races: 0, wins: 0 } } }, applied: [] },
+    planRating(duelRows(), { ranked: true, elos: { a: 100, b: 100 }, pairCounts: {} }),
+    "race-low",
+    "desktop",
+  );
+  assert.equal(low.users.b.desktop.elo, 100);
+  const dq = planRating([
+    { id: "a", place: 1, dq: false, ms: 1000, finished: true, outcome: "finished" },
+    { id: "b", place: 2, dq: true, ms: null, finished: false, outcome: "dnf" },
+  ], { ranked: true, elos: { a: 1000, b: 1100 }, pairCounts: {} });
+  assert.equal(dq.find((row) => row.id === "b").delta, 0);
+  assert.equal(dq.find((row) => row.id === "b").countRace, true);
+  assert.ok(dq.find((row) => row.id === "a").delta > 0);
+});
+
+test("ranked saves add the delta and unranked saves leave elo columns alone", () => {
+  const rows = duelRows();
+  const rankedPlan = planRating(rows, { ranked: true, elos: { a: 1000, b: 1000 }, pairCounts: {} });
+  const rankedSql = saveStatements({
+    id: "race-1",
+    mode: "desktop",
+    sentence: "I love Fluxer",
+    ranked: true,
+    startedAt: 1,
+    finishedAt: 2,
+    rows,
+  }, rankedPlan);
+  const update = rankedSql.find((statement) => statement.sql.includes("MAX(100"));
+  assert.ok(update);
+  assert.match(update.sql, /elo_desktop = MAX\(100, elo_desktop \+ \?\)/);
+  assert.match(update.sql, /NOT EXISTS/);
+  assert.equal(update.sql.includes("elo_desktop = ?"), false);
+  assert.equal(update.binds[0], 16);
+  assert.match(rankedSql[0].sql, /ON CONFLICT\(id\) DO NOTHING/);
+  assert.ok(rankedSql.some((statement) => statement.sql.includes("ON CONFLICT(race_id, user_id) DO NOTHING")));
+  const roomPlan = planRating(rows, { ranked: false, elos: { a: 1000, b: 1000 }, pairCounts: {} });
+  const roomSql = saveStatements({
+    id: "room-1",
+    mode: "desktop",
+    sentence: "I love Fluxer",
+    ranked: false,
+    startedAt: 1,
+    finishedAt: 2,
+    rows,
+  }, roomPlan).map((statement) => statement.sql).join("\n");
+  assert.equal(roomSql.includes("elo_desktop"), false);
+  assert.match(roomSql, /ON CONFLICT\(race_id, user_id\) DO NOTHING/);
 });

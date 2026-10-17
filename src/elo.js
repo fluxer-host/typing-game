@@ -1,6 +1,37 @@
-// Pairwise Elo, averaged across opponents so a 4-player room does not swing
+// Pairwise Elo, averaged across opponents so a 4-player field does not swing
 // three times harder than a duel. K = 32, start at 1000, floor at 100.
-export function eloDeltas(players, k = 32) {
+//
+// Repeated ranked matches between the same two accounts are reduced per pair.
+// The first PAIR_RATED_LIMIT ranked finishes on one ladder inside
+// PAIR_WINDOW_MS use the normal formula. Later finishes in that window
+// contribute 0 for that pair only. Other opponents in the same race still
+// move, and the three ladders do not share this count.
+export const PAIR_WINDOW_MS = 60 * 60 * 1000;
+export const PAIR_RATED_LIMIT = 2;
+
+export function pairKey(a, b) {
+  const left = String(a);
+  const right = String(b);
+  return left < right ? `${left}\0${right}` : `${right}\0${left}`;
+}
+
+export function pairFactor(priorCount) {
+  const count = Number(priorCount) || 0;
+  return count < PAIR_RATED_LIMIT ? 1 : 0;
+}
+
+export function expectedScore(eloA, eloB) {
+  return 1 / (1 + 10 ** ((eloB - eloA) / 400));
+}
+
+// Raw points one player takes from one opponent, before the field is averaged.
+export function eloDelta(player, opponent, k = 32) {
+  const expected = expectedScore(player.elo, opponent.elo);
+  const score = player.place < opponent.place ? 1 : player.place > opponent.place ? 0 : 0.5;
+  return k * (score - expected);
+}
+
+export function eloDeltas(players, k = 32, pairFactorFor = null) {
   const deltas = Object.fromEntries(players.map((player) => [player.id, 0]));
   const count = players.length;
   if (count < 2) return deltas;
@@ -8,22 +39,10 @@ export function eloDeltas(players, k = 32) {
     for (let j = i + 1; j < count; j++) {
       const a = players[i];
       const b = players[j];
-      const expectedA = 1 / (1 + 10 ** ((b.elo - a.elo) / 400));
-      const expectedB = 1 - expectedA;
-      let scoreA;
-      let scoreB;
-      if (a.place < b.place) {
-        scoreA = 1;
-        scoreB = 0;
-      } else if (a.place > b.place) {
-        scoreA = 0;
-        scoreB = 1;
-      } else {
-        scoreA = 0.5;
-        scoreB = 0.5;
-      }
-      deltas[a.id] += k * (scoreA - expectedA);
-      deltas[b.id] += k * (scoreB - expectedB);
+      const factor = typeof pairFactorFor === "function" ? pairFactorFor(a.id, b.id) : 1;
+      const swing = factor * eloDelta(a, b, k);
+      deltas[a.id] += swing;
+      deltas[b.id] -= swing;
     }
   }
   const opponents = count - 1;

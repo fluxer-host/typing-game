@@ -1,4 +1,6 @@
+import { PAIR_WINDOW_MS } from "./elo.js";
 import { MODE_COLUMNS, isMode } from "./modes.js";
+import { pairCountsFromRows, planRating } from "./rating.js";
 import { countsAsWin } from "./results.js";
 
 function columns(mode) {
@@ -86,7 +88,8 @@ export async function leaderboard(env, mode, limit = 25) {
 export async function recentRaces(env, userId, limit = 12) {
   const result = await env.DB.prepare(
     `SELECT r.id, r.mode, r.sentence, r.ranked, r.finished_at,
-            rr.place, rr.wpm, rr.accuracy, rr.ms, rr.elo_before, rr.elo_after
+            rr.place, rr.wpm, rr.accuracy, rr.ms, rr.elo_before, rr.elo_after,
+            (SELECT COUNT(*) FROM race_results c WHERE c.race_id = r.id) AS racers
      FROM race_results rr
      JOIN races r ON r.id = rr.race_id
      WHERE rr.user_id = ?
@@ -98,21 +101,87 @@ export async function recentRaces(env, userId, limit = 12) {
   return result.results || [];
 }
 
-export async function saveRace(env, race) {
+async function priorPairHistory(env, mode, raceId, ids) {
+  if (ids.length < 2) return [];
+  const marks = ids.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    `SELECT rr.race_id AS raceId, rr.user_id AS userId
+     FROM race_results rr
+     JOIN races r ON r.id = rr.race_id
+     WHERE r.ranked = 1
+       AND r.mode = ?
+       AND r.finished_at >= ?
+       AND r.id <> ?
+       AND rr.user_id IN (${marks})`,
+  )
+    .bind(mode, Date.now() - PAIR_WINDOW_MS, raceId, ...ids)
+    .all();
+  return result.results || [];
+}
+
+// One batch. Elo is `elo + delta` from the ratings read just above, and the
+// user row changes only when this race has no result row yet. A retry or a
+// second finish event therefore cannot apply the same race twice. Overlapping
+// races each add their own delta.
+export function saveStatements(race, plan) {
   const cols = columns(race.mode);
+  const planById = new Map((plan || []).map((row) => [row.id, row]));
+  const now = Date.now();
   const statements = [
-    env.DB.prepare(
-      `INSERT INTO races (id, mode, sentence, ranked, started_at, finished_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(race.id, race.mode, race.sentence, race.ranked ? 1 : 0, race.startedAt, race.finishedAt),
+    {
+      sql: `INSERT INTO races (id, mode, sentence, ranked, started_at, finished_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING`,
+      binds: [race.id, race.mode, race.sentence, race.ranked ? 1 : 0, race.startedAt, race.finishedAt],
+    },
   ];
-  for (const row of race.rows) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO race_results (
-           race_id, user_id, place, wpm, accuracy, ms, progress, elo_before, elo_after
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(
+  for (const row of race.rows || []) {
+    const planned = planById.get(row.id) || {
+      eloBefore: null,
+      eloAfter: null,
+      delta: 0,
+      countRace: false,
+    };
+    if (planned.countRace) {
+      const won = countsAsWin(row) ? 1 : 0;
+      const finished = row.ms != null ? 1 : 0;
+      statements.push({
+        sql: `UPDATE users SET
+            ${cols.elo} = MAX(100, ${cols.elo} + ?),
+            ${cols.races} = ${cols.races} + 1,
+            ${cols.wins} = ${cols.wins} + ?,
+            ${cols.best} = CASE
+              WHEN ? = 1 AND (${cols.best} IS NULL OR ? > ${cols.best}) THEN ?
+              ELSE ${cols.best}
+            END,
+            updated_at = ?
+          WHERE id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM race_results WHERE race_id = ? AND user_id = ?
+            )`,
+        binds: [planned.delta, won, finished, row.wpm, row.wpm, now, row.id, race.id, row.id],
+      });
+    } else if (row.ms != null) {
+      statements.push({
+        sql: `UPDATE users SET
+            ${cols.best} = CASE
+              WHEN ${cols.best} IS NULL OR ? > ${cols.best} THEN ?
+              ELSE ${cols.best}
+            END,
+            updated_at = ?
+          WHERE id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM race_results WHERE race_id = ? AND user_id = ?
+            )`,
+        binds: [row.wpm, row.wpm, now, row.id, race.id, row.id],
+      });
+    }
+    statements.push({
+      sql: `INSERT INTO race_results (
+          race_id, user_id, place, wpm, accuracy, ms, progress, elo_before, elo_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(race_id, user_id) DO NOTHING`,
+      binds: [
         race.id,
         row.id,
         row.place,
@@ -120,40 +189,45 @@ export async function saveRace(env, race) {
         row.accuracy,
         row.ms,
         row.progress,
-        row.eloBefore,
-        row.eloAfter,
-      ),
-    );
-    if (race.ranked) {
-      const won = countsAsWin(row) ? 1 : 0;
-      const finished = row.ms != null ? 1 : 0;
-      statements.push(
-        env.DB.prepare(
-          `UPDATE users SET
-             ${cols.elo} = ?,
-             ${cols.races} = ${cols.races} + 1,
-             ${cols.wins} = ${cols.wins} + ?,
-             ${cols.best} = CASE
-               WHEN ? = 1 AND (${cols.best} IS NULL OR ? > ${cols.best}) THEN ?
-               ELSE ${cols.best}
-             END,
-             updated_at = ?
-           WHERE id = ?`,
-        ).bind(row.eloAfter ?? row.eloBefore ?? 1000, won, finished, row.wpm, row.wpm, Date.now(), row.id),
-      );
-    } else if (row.ms != null) {
-      statements.push(
-        env.DB.prepare(
-          `UPDATE users SET
-             ${cols.best} = CASE
-               WHEN ${cols.best} IS NULL OR ? > ${cols.best} THEN ?
-               ELSE ${cols.best}
-             END,
-             updated_at = ?
-           WHERE id = ?`,
-        ).bind(row.wpm, row.wpm, Date.now(), row.id),
-      );
-    }
+        planned.eloBefore,
+        planned.eloAfter,
+      ],
+    });
   }
-  await env.DB.batch(statements);
+  return statements;
+}
+
+export async function saveRace(env, race) {
+  const cols = columns(race.mode);
+  const ids = (race.rows || []).map((row) => row.id);
+  const rated = Boolean(race.ranked) && ids.length >= 2;
+  let elos = {};
+  let pairCounts = {};
+  if (rated) {
+    const users = await getUsers(env, ids);
+    elos = Object.fromEntries(ids.map((id) => [id, 1000]));
+    for (const user of users) elos[user.id] = Number(user[cols.elo] ?? 1000);
+    pairCounts = pairCountsFromRows(await priorPairHistory(env, race.mode, race.id, ids), ids);
+  }
+  const plan = planRating(race.rows, { ranked: rated, elos, pairCounts });
+  const statements = saveStatements(race, plan).map(({ sql, binds }) => env.DB.prepare(sql).bind(...binds));
+  if (statements.length) await env.DB.batch(statements);
+  const stored = await env.DB.prepare(
+    `SELECT user_id AS id, elo_before AS eloBefore, elo_after AS eloAfter
+     FROM race_results WHERE race_id = ?`,
+  )
+    .bind(race.id)
+    .all();
+  const byId = new Map((stored.results || []).map((row) => [row.id, row]));
+  return {
+    rows: (race.rows || []).map((row) => {
+      const saved = byId.get(row.id);
+      if (!saved) return { ...row, eloBefore: null, eloAfter: null };
+      return {
+        ...row,
+        eloBefore: saved.eloBefore ?? saved.elo_before ?? null,
+        eloAfter: saved.eloAfter ?? saved.elo_after ?? null,
+      };
+    }),
+  };
 }

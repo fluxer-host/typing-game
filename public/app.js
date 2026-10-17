@@ -87,6 +87,7 @@ const state = {
   offset: 0,
   raceId: null,
   ranked: false,
+  kind: null,
   players: [],
   live: [],
   results: null,
@@ -415,8 +416,10 @@ function queueView() {
 function queueCopy() {
   const waiting = state.queue?.waiting || 1;
   const length = lengthInfo(state.length)?.title || "Sprint";
-  if (waiting < 2) return `You are on the ${MODES[state.mode].title} ladder, ${length}. Waiting for another racer.`;
-  return `${waiting} racers are here. The room opens in a moment.`;
+  const ladder = MODES[state.mode].title;
+  if (waiting < 2) return `You are on the ${ladder} ladder, ${length}. Waiting for another racer.`;
+  if (state.queue?.matching) return `${waiting} racers are here. The room opens in a moment.`;
+  return `${waiting} racers are here. Waiting for a closer rating, or for the window to widen.`;
 }
 
 function roomView() {
@@ -425,7 +428,7 @@ function roomView() {
   box.append(h("h1", { class: "lead", text: "Room" }));
   box.append(h("div", { class: "code", id: "room-code-label", text: room?.code || "" }));
   const roomLength = lengthInfo(state.length)?.title || "Sprint";
-  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength}. Listed in Open rooms until the host starts.` }));
+  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength} · Unranked. No rating change. Listed in Open rooms until the host starts.` }));
   const list = h("ul", { class: "room-list", id: "room-players" });
   box.append(list);
   const actions = h("div", { class: "actions" });
@@ -478,7 +481,7 @@ function openBrowse() {
 function browseView() {
   const box = h("div", {});
   box.append(h("h1", { class: "lead", text: "Open rooms" }));
-  box.append(h("p", { class: "muted", text: "Rooms waiting for a host to start. The list shows who is inside and how many seats are left." }));
+  box.append(h("p", { class: "muted", text: "Rooms waiting for a host to start. Private rooms are Unranked and do not change rating. The list shows who is inside and how many seats are left." }));
   box.append(h("div", { id: "room-directory", class: "room-directory" }));
   box.append(h("div", { class: "actions" }, [
     h("button", {
@@ -515,7 +518,7 @@ function paintRooms() {
     card.append(head);
     const modeTitle = MODES[room.mode]?.title || "Desktop";
     const lengthTitle = lengthInfo(room.length)?.title || "Sprint";
-    card.append(h("p", { class: "muted", text: `${modeTitle} · ${lengthTitle}` }));
+    card.append(h("p", { class: "muted", text: `${modeTitle} · ${lengthTitle} · Unranked` }));
     const list = h("ul", { class: "room-list" });
     for (const player of room.players || []) {
       const item = h("li", {});
@@ -549,7 +552,7 @@ function raceView() {
   }));
   const top = h("div", { class: "race-top" });
   const raceLength = lengthInfo(state.length)?.title || "Sprint";
-  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${state.ranked ? "rated" : "practice"}` }));
+  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${raceStandingWord()}` }));
   top.append(h("span", { class: "stats", id: "stats", text: "" }));
   top.append(h("button", {
     id: "leave-race",
@@ -708,7 +711,10 @@ function resultsCopy() {
   const me = rows.find((row) => row.id === state.me?.id);
   const others = rows.filter((row) => row.id !== state.me?.id);
   if (!me) return { title: "Finish order", detail: "" };
-  if (me.outcome === "forfeit") return { title: "You forfeited", detail: "This race counts as a loss." };
+  if (me.outcome === "forfeit") {
+    if (raceStandingWord() === "rated") return { title: "You forfeited", detail: "This race counts as a loss." };
+    return { title: "You left", detail: "This race does not change rating." };
+  }
   if (me.outcome === "timeout" || me.outcome === "disconnect") return { title: "Timed out", detail: "The race moved on without you." };
   if (others.some((row) => row.outcome === "forfeit") && (me.outcome === "forfeit-win" || me.place === 1)) {
     return { title: "Opponent forfeited, you win", detail: "You take the win." };
@@ -724,6 +730,9 @@ function resultsView() {
   const copy = resultsCopy();
   box.append(h("h1", { class: "lead", text: copy.title }));
   if (copy.detail) box.append(h("p", { class: "muted", text: copy.detail }));
+  if (!state.results?.cancelled && raceStandingWord() === "Unranked") {
+    box.append(h("p", { class: "pill", text: "Unranked" }));
+  }
   if (!state.results?.cancelled) {
     box.append(h("p", { class: "quote", text: state.results?.sentence || state.sentence }));
     box.append(resultTable());
@@ -813,7 +822,7 @@ function resultTable() {
     tr.append(h("td", { text: Number(row.wpm).toFixed(1) }));
     tr.append(h("td", { text: `${row.accuracy}%` }));
     tr.append(h("td", { text: row.ms == null ? "DNF" : `${(row.ms / 1000).toFixed(1)}s` }));
-    const delta = row.eloAfter == null || row.eloBefore == null ? "unrated" : formatDelta(row.eloAfter - row.eloBefore);
+    const delta = eloText(row);
     const cell = h("td", { text: delta, class: delta.startsWith("+") ? "up" : delta.startsWith("-") ? "down" : "" });
     tr.append(cell);
     body.append(tr);
@@ -832,6 +841,26 @@ function placeLabel(row) {
 function formatDelta(value) {
   if (value > 0) return `+${value}`;
   return String(value);
+}
+
+function raceKind() {
+  if (state.results?.kind === "room" || state.results?.kind === "practice" || state.results?.kind === "queue") return state.results.kind;
+  if (state.kind === "room" || state.kind === "practice" || state.kind === "queue") return state.kind;
+  if (state.ranked) return "queue";
+  return (state.players || []).length >= 2 ? "room" : "practice";
+}
+
+function raceStandingWord() {
+  const ranked = state.results && typeof state.results.ranked === "boolean" ? state.results.ranked : state.ranked;
+  if (ranked || raceKind() === "queue") return "rated";
+  if (raceKind() === "room") return "Unranked";
+  return "practice";
+}
+
+function eloText(row) {
+  if (row.eloAfter != null && row.eloBefore != null) return formatDelta(row.eloAfter - row.eloBefore);
+  if (raceKind() === "room") return "Unranked";
+  return "unrated";
 }
 
 function paintModes() {
@@ -1355,7 +1384,8 @@ function renderSide() {
   for (const race of state.recent) {
     const line = h("div", { class: "recent-row" });
     const place = race.ms == null ? "DNF" : `#${race.place}`;
-    line.append(h("b", { text: `${place} · ${race.mode}` }));
+    const label = race.label || (race.ranked ? "rated" : ((race.racers || 0) >= 2 ? "Unranked" : "practice"));
+    line.append(h("b", { text: `${place} · ${race.mode} · ${label}` }));
     line.append(h("span", { text: `${Number(race.wpm).toFixed(0)} wpm` }));
     recent.append(line);
   }
@@ -1665,6 +1695,7 @@ function startMatch(msg) {
   state.mode = msg.mode;
   if (msg.length) state.length = msg.length;
   state.ranked = msg.ranked;
+  state.kind = msg.kind || (msg.ranked ? "queue" : ((msg.players || []).length >= 2 ? "room" : "practice"));
   state.players = msg.players || [];
   state.live = (msg.players || []).map((player) => ({ id: player.id, i: 0, wpm: 0, finishedAt: null }));
   state.results = null;
@@ -1794,6 +1825,7 @@ function absorbHello(msg) {
   state.mode = msg.mode;
   if (msg.length) state.length = msg.length;
   state.ranked = msg.ranked;
+  state.kind = msg.kind || state.kind || (msg.ranked ? "queue" : ((msg.players || state.players || []).length >= 2 ? "room" : "practice"));
   state.players = msg.players || state.players;
   if (msg.results) {
     absorbResults(msg.results.t ? msg.results : { t: "results", ...msg.results });
@@ -1842,6 +1874,8 @@ function absorbState(msg) {
 function absorbResults(msg) {
   if (state.forfeitedLocally) return;
   state.results = msg;
+  if (msg.kind) state.kind = msg.kind;
+  if (typeof msg.ranked === "boolean") state.ranked = msg.ranked;
   for (const row of msg.rows || []) {
     const live = state.live.find((entry) => entry.id === row.id);
     if (!live) continue;
@@ -1881,6 +1915,7 @@ function exitToLobby() {
   state.raceLink = "up";
   clearResume();
   state.raceId = null;
+  state.kind = null;
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
