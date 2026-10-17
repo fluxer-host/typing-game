@@ -5,8 +5,24 @@ import {
   emptyInputSession,
   textUnits,
 } from "./input.js";
+import { accuracy, wpm } from "../src/score.js";
+import { lengthList } from "../src/lengths.js";
+import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
 import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
 import { raceKeyPlan } from "./keys.js";
+import { appendLadders } from "./ladder-picker.js";
+import {
+  appendRun,
+  buildStatsModel,
+  displayStanding,
+  loadHistory,
+  recentLabel,
+  saveHistory,
+  serverRaceRow,
+} from "./history.js";
+import { soloFinish, soloStart } from "./solo.js";
+import { renderSoloResults } from "./solo-view.js";
+import { renderStats } from "./stats-view.js";
 import {
   LOBBY_RETRY_BASE_MS,
   LOBBY_RETRY_CAP_MS,
@@ -110,6 +126,13 @@ const state = {
   lobbyNotice: "",
   raceLink: "up",
   playLock: false,
+  localPractice: false,
+  soloSaved: false,
+  passageId: "",
+  soloRun: null,
+  localRuns: loadHistory(),
+  route: typeof location !== "undefined" && location.hash === "#/stats" ? "stats" : "",
+  clearConfirm: false,
 };
 
 let lobby = null;
@@ -175,7 +198,10 @@ function toast(text) {
 }
 
 function setPageTitle() {
-  const next = pageTitle(state.phase);
+  const settled = state.session === "in" || state.session === "out";
+  const racing = state.phase === "countdown" || state.phase === "race" || state.phase === "finishing" || state.phase === "results";
+  const phase = settled && !racing && state.route === "stats" ? "stats" : state.phase;
+  const next = phase === state.phase ? pageTitle(state.phase) : pageTitle(phase);
   if (document.title !== next) document.title = next;
 }
 
@@ -194,11 +220,6 @@ function serverNow() {
   return Date.now() + state.offset;
 }
 
-function wpm(chars, ms) {
-  if (chars <= 0 || ms <= 0) return 0;
-  return Math.round((chars / 5 / (ms / 60000)) * 10) / 10;
-}
-
 function currentWpm() {
   const elapsed = serverNow() - state.startAt;
   if (elapsed < 400) return 0;
@@ -210,6 +231,8 @@ function shellName() {
     session: state.session,
     phase: state.phase,
     lobbyOpen: state.lobbyStatus === "open",
+    solo: Boolean(state.localPractice),
+    view: state.route === "stats" ? "stats" : "",
   });
 }
 
@@ -264,7 +287,11 @@ function initialNode(player, className) {
 }
 
 function lengthInfo(id) {
-  return (state.config?.lengths || []).find((row) => row.id === id) || null;
+  return (state.config?.lengths || lengthList()).find((row) => row.id === id) || null;
+}
+
+function lengthChoices() {
+  return state.config?.lengths?.length ? state.config.lengths : lengthList();
 }
 
 function modeElo() {
@@ -283,8 +310,10 @@ function ensure() {
   paintDynamic();
   renderAccount();
   renderSide();
+  paintNav();
   // Banners paint in the same turn. Announce the result last so it stays in the live region.
   if (entered && state.shell === "results") announceResults();
+  if (entered && state.shell === "solo-results") announceSolo();
 }
 
 function paintShell() {
@@ -307,6 +336,8 @@ function paintShell() {
   else if (state.shell === "browse") stage.append(browseView());
   else if (state.shell === "race") stage.append(raceView());
   else if (state.shell === "results") stage.append(resultsView());
+  else if (state.shell === "solo-results") stage.append(soloResultsView());
+  else if (state.shell === "stats") stage.append(h("div", { id: "stats-root", class: "stats-page" }));
 }
 
 function bootErrorView() {
@@ -322,10 +353,25 @@ function bootErrorView() {
 function authView() {
   const box = h("div", {});
   box.append(h("h2", { class: "lead", text: "Race the room" }));
-  box.append(h("p", { class: "muted", text: "Everyone in a match gets the same Fluxer passage. First to finish wins." }));
+  box.append(h("p", { class: "muted", text: "Everyone in a match gets the same passage. First to finish wins. Practice on this browser is not ranked." }));
+  appendLadders(box, h, {
+    modes: MODES,
+    lengths: lengthChoices(),
+    mode: state.mode,
+    length: state.length,
+    onMode: chooseMode,
+    onLength: chooseLength,
+  });
   const actions = h("div", { class: "actions" });
+  actions.append(h("button", {
+    class: "btn primary",
+    type: "button",
+    "data-action": "practice",
+    text: "Practice",
+    onclick: () => beginSolo(),
+  }));
   if (state.config?.oauth) {
-    actions.append(h("a", { class: "btn primary", href: "/auth/login", text: "Sign in with Fluxer" }));
+    actions.append(h("a", { class: "btn", href: "/auth/login", text: "Sign in with Fluxer" }));
   }
   box.append(actions);
   if (state.config.devLogin) {
@@ -366,46 +412,26 @@ function authView() {
 function lobbyView() {
   const box = h("div", {});
   box.append(h("h2", { class: "lead", text: "Pick a ladder" }));
-  box.append(h("p", { class: "muted", text: "Queue for a live room, practice alone, or join an open room." }));
-  const modes = h("div", { class: "modes", role: "group", "aria-labelledby": "ladder-label" });
-  modes.append(h("span", { id: "ladder-label", class: "visually-hidden", text: "Ladder" }));
-  for (const [id, info] of Object.entries(MODES)) {
-    const elo = state.me?.elo?.[id];
-    const best = state.me?.best?.[id];
-    const card = h("button", {
-      class: `mode${state.mode === id ? " selected" : ""}`,
-      type: "button",
-      "data-mode": id,
-      "aria-pressed": state.mode === id ? "true" : "false",
-      onclick: () => chooseMode(id),
-    });
-    card.append(h("strong", { text: info.title }));
-    card.append(h("span", { text: info.blurb }));
-    card.append(h("em", { text: `${Math.round(elo ?? 1000)} elo${best ? ` · best ${best} wpm` : ""}` }));
-    modes.append(card);
-  }
-  box.append(modes);
-  const lengths = h("div", { class: "modes lengths", role: "group", "aria-labelledby": "length-label" });
-  lengths.append(h("span", { id: "length-label", class: "visually-hidden", text: "Race length" }));
-  for (const info of state.config?.lengths || []) {
-    const card = h("button", {
-      class: `length${state.length === info.id ? " selected" : ""}`,
-      type: "button",
-      "data-length": info.id,
-      "aria-pressed": state.length === info.id ? "true" : "false",
-      onclick: () => chooseLength(info.id),
-    });
-    card.append(h("strong", { text: info.title }));
-    card.append(h("span", { text: info.blurb }));
-    lengths.append(card);
-  }
-  box.append(lengths);
+  box.append(h("p", { class: "muted", text: "Queue for a live room, practice alone, or join an open room. Practice stays on this browser and is not ranked." }));
+  appendLadders(box, h, {
+    modes: MODES,
+    lengths: state.config?.lengths || [],
+    mode: state.mode,
+    length: state.length,
+    onMode: chooseMode,
+    onLength: chooseLength,
+    detail: (id) => {
+      const elo = state.me?.elo?.[id];
+      const best = state.me?.best?.[id];
+      return `${Math.round(elo ?? 1000)} elo${best ? ` · best ${best} wpm` : ""}`;
+    },
+  });
   box.append(h("div", { id: "config-note", hidden: true }));
   const actions = h("div", { class: "actions" });
   const play = () => ({ mode: state.mode, length: state.length });
   actions.append(
     h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => beginPlay("queue", { t: "queue", ...play() }) }),
-    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => beginPlay("practice", { t: "practice", ...play() }) }),
+    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => beginSolo() }),
     h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => beginPlay("room", { t: "room_create", ...play() }) }),
     h("button", { class: "btn", type: "button", "data-action": "browse", text: "Open rooms", onclick: openBrowse }),
   );
@@ -578,7 +604,7 @@ function raceView() {
   }));
   const top = h("div", { class: "race-top" });
   const raceLength = lengthInfo(state.length)?.title || "Sprint";
-  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${raceStandingWord()}` }));
+  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${racePillText()}` }));
   top.append(h("span", { class: "stats", id: "stats", text: "" }));
   top.append(h("button", {
     id: "leave-race",
@@ -852,9 +878,10 @@ function askRematch() {
     sendLobby({ t: "rematch_cancel" });
     return;
   }
-  const solo = !state.ranked || (state.players || []).length < 2;
-  if (solo) {
-    beginPlay("practice", { t: "practice", mode: state.mode, length: state.length });
+  const alone = state.localPractice || !state.ranked || (state.players || []).length < 2;
+  if (alone) {
+    releaseRaceSocket();
+    beginSolo();
     return;
   }
   sendLobby({ t: "rematch", raceId: state.raceId });
@@ -925,6 +952,14 @@ function raceStandingWord() {
   return "practice";
 }
 
+function racePillText() {
+  const word = raceStandingWord();
+  return displayStanding({
+    ranked: word === "rated",
+    label: word === "practice" ? "practice" : word,
+  });
+}
+
 function eloText(row) {
   if (row.eloAfter != null && row.eloBefore != null) return formatDelta(row.eloAfter - row.eloBefore);
   if (raceKind() === "room") return "Unranked";
@@ -949,10 +984,11 @@ function paintLengths() {
 
 function paintDynamic() {
   if (state.shell === "lobby" || state.shell === "auth") paintConfigNote();
-  if (state.shell === "lobby") {
+  if (state.shell === "lobby" || state.shell === "auth") {
     paintModes();
     paintLengths();
   }
+  if (state.shell === "stats") paintStatsPage();
   if (state.shell === "queue") {
     const copy = document.getElementById("queue-copy");
     if (copy) copy.textContent = queueCopy();
@@ -1126,10 +1162,8 @@ function paintStats() {
   const node = document.getElementById("stats");
   if (!node) return;
   const elapsed = Math.max(0, serverNow() - state.startAt);
-  const accTotal = state.ok + state.err;
-  const acc = accTotal ? Math.round((state.ok / accTotal) * 1000) / 10 : 100;
   const clock = state.phase === "countdown" ? "ready" : `${(elapsed / 1000).toFixed(1)}s`;
-  node.textContent = `${currentWpm().toFixed(1)} wpm · ${acc}% · ${clock}`;
+  node.textContent = `${currentWpm().toFixed(1)} wpm · ${accuracy(state.ok, state.err)}% · ${clock}`;
 }
 
 function paintLocked() {
@@ -1147,7 +1181,7 @@ function paintRaceNote() {
   const note = document.getElementById("race-note");
   if (!note) return;
   const mine = myLive();
-  const others = state.live.filter((row) => row.id !== state.me?.id);
+  const others = state.live.filter((row) => row.id !== selfId());
   let text = "";
   if (mine?.status === "timeout" || mine?.status === "disconnect") text = "You timed out.";
   else if (others.some((row) => row.status === "forfeit" || row.status === "disconnect")) text = "Opponent left.";
@@ -1168,8 +1202,15 @@ function paceLabel(row) {
   return `${Number(row.wpm || 0).toFixed(0)}`;
 }
 
+function selfId() {
+  if (state.localPractice) return state.players[0]?.id || "local";
+  return state.me?.id;
+}
+
 function myLive() {
-  return state.live.find((row) => row.id === state.me?.id) || null;
+  const id = selfId();
+  if (!id) return null;
+  return state.live.find((row) => row.id === id) || null;
 }
 
 function racedOut() {
@@ -1377,6 +1418,10 @@ function commitTyping(effect) {
     if (step.kind === "fin") state.phase = "finishing";
     publish(step.kind, step.text);
   }
+  if (state.localPractice && state.phase === "finishing") {
+    finishSolo();
+    return;
+  }
   paintPassage();
   paintStats();
   paintLocked();
@@ -1402,7 +1447,7 @@ function applyServerText(msg) {
 }
 
 function localLane() {
-  const mine = state.live.find((row) => row.id === state.me?.id);
+  const mine = state.live.find((row) => row.id === selfId());
   if (!mine) return;
   mine.i = correctLength(state.typed, state.sentence);
   mine.wpm = currentWpm();
@@ -1467,14 +1512,13 @@ function renderSide() {
   }
   const recent = document.getElementById("recent");
   recent.replaceChildren(h("h2", { text: "Recent" }));
+  const rows = sideRecent();
   if (state.recentError) recent.append(inlineError(state.recentError, () => retryNow("recent", () => pullRecent())));
-  else if (!state.recent.length) recent.append(h("p", { class: "empty", text: "Your races show up here." }));
-  for (const race of state.recent) {
+  if (!rows.length && !state.recentError) recent.append(h("p", { class: "empty", text: "Your races show up here." }));
+  for (const race of rows) {
     const line = h("div", { class: "recent-row" });
-    const place = race.ms == null ? "DNF" : `#${race.place}`;
-    const label = race.label || (race.ranked ? "rated" : ((race.racers || 0) >= 2 ? "Unranked" : "practice"));
-    line.append(h("b", { text: `${place} · ${race.mode} · ${label}` }));
-    line.append(h("span", { text: `${Number(race.wpm).toFixed(0)} wpm` }));
+    line.append(h("b", { text: recentLabel(race) }));
+    line.append(h("span", { text: `${Number(race.wpm || 0).toFixed(0)} wpm` }));
     recent.append(line);
   }
 }
@@ -1508,11 +1552,19 @@ function paintLanes() {
   }
 }
 
+function rememberPreference(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+  } catch {
+    // Private mode can reject storage. The choice still applies for this visit.
+  }
+}
+
 function chooseMode(mode) {
   if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
   if (!MODES[mode]) return;
   state.mode = mode;
-  localStorage.setItem("tg_mode", mode);
+  rememberPreference("tg_mode", mode);
   paintModes();
   pullBoard();
 }
@@ -1521,7 +1573,7 @@ function chooseLength(length) {
   if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
   if (!lengthInfo(length)) return;
   state.length = length;
-  localStorage.setItem("tg_length", length);
+  rememberPreference("tg_length", length);
   paintLengths();
 }
 
@@ -2011,6 +2063,10 @@ function exitToLobby() {
   clearResume();
   state.raceId = null;
   state.kind = null;
+  state.localPractice = false;
+  state.soloSaved = false;
+  state.passageId = "";
+  state.soloRun = null;
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
@@ -2021,10 +2077,18 @@ function exitToLobby() {
   state.queue = null;
   state.rematch = null;
   state.forfeitConfirm = false;
+  if (location.hash !== "#/stats") {
+    state.route = "";
+    state.clearConfirm = false;
+  }
   ensure();
 }
 
 function requestLeave() {
+  if (state.localPractice) {
+    exitToLobby();
+    return;
+  }
   if (racedOut()) {
     state.forfeitedLocally = true;
     const sock = raceSocket;
@@ -2109,10 +2173,8 @@ function commitLeave() {
 
 function practiceAgain() {
   if (state.playLock) return;
-  const mode = state.mode;
-  const length = state.length;
   releaseRaceSocket();
-  beginPlay("practice", { t: "practice", mode, length });
+  beginSolo();
 }
 
 function queueAgain() {
@@ -2402,6 +2464,10 @@ function dropLocalSession() {
   state.me = null;
   state.recent = [];
   state.recentError = "";
+  state.localPractice = false;
+  state.soloSaved = false;
+  state.passageId = "";
+  state.soloRun = null;
   state.phase = "lobby";
   state.results = null;
   state.players = [];
@@ -2418,6 +2484,165 @@ function dropLocalSession() {
 
 function refreshAfterRace() {
   return Promise.allSettled([pullBoard(), pullRecent(), refreshProfile()]);
+}
+
+function sideRecent() {
+  const server = state.session === "in" ? state.recent.map((race) => serverRaceRow(race, lengthOfText)) : [];
+  return buildStatsModel({ local: state.localRuns, server, passageIdForText }).recent.slice(0, 8);
+}
+
+function beginSolo(options = {}) {
+  const avoid = state.localRuns.slice(-RECENT_AVOID).map((run) => run.passageId).filter(Boolean);
+  if (state.passageId) avoid.push(state.passageId);
+  const patch = soloStart({
+    mode: state.mode,
+    length: state.length,
+    me: state.me,
+    now: serverNow(),
+    avoid,
+    passageId: options.passageId || (options.same ? state.passageId : ""),
+    same: Boolean(options.same),
+  });
+  if (!patch.sentence) {
+    toast("No passage is available for that ladder.");
+    return;
+  }
+  Object.assign(state, patch);
+  state.shell = "";
+  inputSession = emptyInputSession();
+  lastLive = "";
+  lastNote = "";
+  heardLock = false;
+  heardFinish.clear();
+  rememberPreference("tg_mode", state.mode);
+  rememberPreference("tg_length", state.length);
+  ensure();
+  announce("Go. Practice started.");
+  focusCapture();
+}
+
+function finishSolo() {
+  if (!state.localPractice || state.soloSaved) return;
+  state.soloSaved = true;
+  const run = soloFinish({
+    sentence: state.sentence,
+    startAt: state.startAt,
+    now: serverNow(),
+    ok: state.ok,
+    err: state.err,
+    mode: state.mode,
+    length: state.length,
+    passageId: state.passageId,
+  });
+  state.soloRun = run;
+  state.localRuns = appendRun(state.localRuns, run);
+  if (!saveHistory(state.localRuns)) toast("This browser did not save the practice run.");
+  state.phase = "results";
+  state.shell = "";
+  ensure();
+}
+
+function announceSolo() {
+  const run = state.soloRun;
+  if (!run) {
+    announce("Practice finished.");
+    return;
+  }
+  const seconds = (Number(run.ms) / 1000).toFixed(1);
+  announce(`Practice finished. ${Number(run.wpm).toFixed(1)} words per minute, ${run.accuracy}% accuracy, ${seconds} seconds, ${run.errors} errors.`);
+}
+
+function soloResultsView() {
+  const box = h("div", { class: "results" });
+  const run = state.soloRun || {};
+  renderSoloResults(box, h, {
+    sentence: state.sentence,
+    wpm: run.wpm || 0,
+    accuracy: run.accuracy || 0,
+    ms: run.ms || 0,
+    errors: run.errors || 0,
+    signedIn: state.session === "in",
+    loginHref: state.config?.oauth ? "/auth/login" : "",
+    onAgain: () => beginSolo({ same: true }),
+    onNew: () => beginSolo(),
+    onRace: () => exitToLobby(),
+  });
+  return box;
+}
+
+let statsToken = "";
+
+function statsActions() {
+  return {
+    signedIn: state.session === "in",
+    confirm: state.clearConfirm,
+    localRuns: state.localRuns,
+    onRetry: (run) => {
+      state.mode = run.mode || state.mode;
+      if (run.length) state.length = run.length;
+      state.clearConfirm = false;
+      if (location.hash) location.hash = "";
+      state.route = "";
+      rememberPreference("tg_mode", state.mode);
+      rememberPreference("tg_length", state.length);
+      beginSolo({ same: true, passageId: run.passageId });
+    },
+    onExport: downloadHistory,
+    onAskClear: () => {
+      state.clearConfirm = true;
+      statsToken = "";
+      ensure();
+      document.getElementById("clear-yes")?.focus();
+    },
+    onConfirmClear: () => {
+      state.localRuns = [];
+      state.clearConfirm = false;
+      statsToken = "";
+      if (!saveHistory([])) toast("This browser could not clear local history.");
+      else announce("Local practice history cleared.");
+      ensure();
+    },
+    onCancelClear: () => {
+      state.clearConfirm = false;
+      statsToken = "";
+      ensure();
+    },
+  };
+}
+
+function paintStatsPage() {
+  const root = document.getElementById("stats-root");
+  if (!root) return;
+  const last = state.localRuns[state.localRuns.length - 1];
+  const token = [state.session, state.localRuns.length, last?.at || 0, state.recent.length, state.recentError, state.clearConfirm].join(":");
+  if (token === statsToken && root.childElementCount) return;
+  statsToken = token;
+  root.replaceChildren();
+  const server = state.session === "in" ? state.recent.map((race) => serverRaceRow(race, lengthOfText)) : [];
+  renderStats(root, h, buildStatsModel({ local: state.localRuns, server, passageIdForText }), statsActions());
+}
+
+function downloadHistory(text) {
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "typing-practice-history.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    toast("This browser could not export the history.");
+  }
+}
+
+function paintNav() {
+  const link = document.querySelector(".nav-stats");
+  if (!link) return;
+  if (state.shell === "stats") link.setAttribute("aria-current", "page");
+  else link.removeAttribute("aria-current");
 }
 
 async function boot() {
@@ -2443,5 +2668,18 @@ async function boot() {
     ensure();
   }
 }
+
+window.addEventListener("hashchange", () => {
+  const next = location.hash === "#/stats" ? "stats" : "";
+  const racing = state.phase === "countdown" || state.phase === "race" || state.phase === "finishing";
+  const holding = state.phase === "queue" || state.phase === "room" || state.phase === "browse";
+  if ((racing || holding) && next === "stats") {
+    history.replaceState({}, "", `${location.pathname}${location.search}`);
+    return;
+  }
+  state.route = next;
+  if (state.route !== "stats") state.clearConfirm = false;
+  ensure();
+});
 
 boot();

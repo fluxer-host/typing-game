@@ -17,7 +17,7 @@ Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer
 1. Sign in with Fluxer OAuth (`identify` scope, authorization code, PKCE `S256`).
 2. Pick a ladder: Desktop, Mobile, or Cursor.
 3. Queue, practice alone, or join an open room. Open rooms lists who is waiting and how many seats are left. A 4-character code still joins a room directly.
-4. The lobby Durable Object gives the whole room one passage and one start time. A sprint is one sentence, a set is three, and a long race is five. The queue only pairs racers who picked the same ladder and the same length.
+4. The lobby Durable Object gives the whole room one passage and one start time. A sprint is a short passage, a set is a medium passage, and a long race is a long passage. The queue only pairs racers who picked the same ladder and the same length.
 5. A race Durable Object watches progress. The first completed passage it receives is first place. The race ends when everyone has finished, or when the clock runs out: 2 minutes, 4 minutes, or 6 minutes. Rematch keeps the same ladder and length. A practice rematch starts at once. A rated rematch starts when two or more people from that race click Rematch, on a new passage.
 6. Rated matches update that ladder's Elo. Practice does not.
 
@@ -25,7 +25,7 @@ Desktop and Mobile are separate keyboard ladders. Cursor is mouse only: the page
 
 This is a small friendly race. Finish order is the order the server hears a completed sentence. The page ignores paste so a normal browser types one character at a time. There is no ban system and no keystroke profile. A modified client can still claim progress.
 
-Sentences are original lines built from public Fluxer lore: the name, the flux capacitor, Plutonium, Visionary badges, and self-hosting. Cursor lines are the short ones.
+Passages are original prose. Desktop and Mobile share one pool. Cursor passages use only the characters on the on-screen keys. A visitor can practice without an account. Those runs stay in the browser. Ranked races still come from the server.
 
 ## Local play
 

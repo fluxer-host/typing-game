@@ -7,6 +7,7 @@ import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "
 const css = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+const ladders = readFileSync(new URL("../public/ladder-picker.js", import.meta.url), "utf8");
 
 function cssVars(source) {
   const block = source.match(/:root\s*\{([\s\S]*?)\}/);
@@ -74,6 +75,7 @@ test("the page title follows the race phase and not the hostname", () => {
   assert.equal(pageTitle("race"), "Typing race, racing");
   assert.equal(pageTitle("finishing"), "Typing race, racing");
   assert.equal(pageTitle("results"), "Typing race, results");
+  assert.equal(pageTitle("stats"), "Typing race, stats");
   assert.equal(pageTitle("lobby"), "Typing race");
   assert.equal(pageTitle(""), "Typing race");
   assert.equal(app.includes("document.title = host"), false);
@@ -162,8 +164,8 @@ test("the page exposes one polite live region, a heading, and named controls", (
   assert.match(css, /\.passage-wrap:focus-within/);
   assert.match(css, /button:focus-visible/);
   assert.match(app, /aria-describedby": "race-hint"/);
-  assert.match(app, /aria-labelledby": "ladder-label"/);
-  assert.match(app, /aria-labelledby": "length-label"/);
+  assert.match(ladders, /aria-labelledby": "ladder-label"/);
+  assert.match(ladders, /aria-labelledby": "length-label"/);
   assert.match(app, /aria-pressed/);
   assert.match(app, /scope: "col"/);
   assert.match(app, /caption/);

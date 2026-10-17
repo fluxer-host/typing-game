@@ -70,6 +70,10 @@ button { cursor: pointer; }
 
 .brand-name span { color: var(--flux-2); font-weight: 600; }
 
+.top-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.nav-stats[aria-current="page"] { border-color: var(--flux-edge); }
+
 .account {
   display: flex;
   align-items: center;
@@ -336,7 +340,61 @@ a.btn { text-decoration: none; }
 
 .locked { color: var(--good); }
 
-.quote { font-family: var(--mono); color: var(--muted); }
+.quote { font-family: var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+
+.stats-page { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+
+.stats-page h3 { font-size: 1rem; margin: 22px 0 8px; }
+
+.stats-summary { margin: 8px 0 0; }
+
+.stats-table { width: 100%; table-layout: fixed; }
+
+.stats-table th, .stats-table td { overflow-wrap: anywhere; }
+
+.solo-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.solo-stats div {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  min-width: 0;
+  min-height: 44px;
+}
+
+.solo-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.trend-svg { display: block; width: 100%; height: auto; max-width: 100%; }
+
+.trend-line {
+  fill: none;
+  stroke: var(--flux-2);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.trend-dot { fill: var(--flux-2); }
+
+.confirm {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-3);
+}
 
 table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
 
@@ -480,6 +538,31 @@ button:focus-visible, a:focus-visible, input:focus-visible,
 
 @media (max-width: 540px) {
   .top { min-height: 140px; }
+  .solo-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stats-table, .stats-table tbody, .stats-table tr, .stats-table td { display: block; width: 100%; }
+  .stats-table { table-layout: auto; }
+  .stats-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .stats-table tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+  .stats-table td { border: 0; padding: 4px 0; text-align: left; }
+  .stats-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+}
+
+@media (max-width: 360px) {
+  .app { width: min(1120px, calc(100% - 16px)); }
+  .stage { padding: 14px; }
 }
 
 @media (max-width: 720px) {

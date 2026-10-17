@@ -7,7 +7,7 @@ import { isMode } from "./modes.js";
 import { websocketOriginAllowed } from "./origin.js";
 import { publicPlayer } from "./profile.js";
 import { REMATCH_TTL_MS, rematchExpired } from "./retention.js";
-import { pickPassage } from "./sentences.js";
+import { pickPassageRecord, rememberIds, unionAvoid } from "./sentences.js";
 
 const GATHER_MS = 1500;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -73,6 +73,30 @@ export class Lobby {
     this.rematchHold = Object.create(null);
     this.rematchDue = null;
     this.pending = Object.create(null);
+    this.recentPassageIds = new Map();
+  }
+
+  avoidFor(live) {
+    const groups = [];
+    for (const entry of live) {
+      const userId = entry.att?.user?.id;
+      if (userId) groups.push(this.recentPassageIds.get(userId) || []);
+      const room = entry.att?.room;
+      if (room) groups.push(this.recentPassageIds.get(`room:${room}`) || []);
+    }
+    return unionAvoid(groups);
+  }
+
+  rememberLaunch(live, id) {
+    const keys = new Set();
+    for (const entry of live) {
+      const userId = entry.att?.user?.id;
+      if (userId) keys.add(userId);
+      if (entry.att?.room) keys.add(`room:${entry.att.room}`);
+    }
+    for (const key of keys) {
+      this.recentPassageIds.set(key, rememberIds(this.recentPassageIds.get(key), id));
+    }
   }
 
   sockets() {
@@ -638,7 +662,8 @@ export class Lobby {
       });
       const lane = readLength(length);
       const raceId = crypto.randomUUID();
-      const sentence = pickPassage(mode, LENGTHS[lane].sentences);
+      const record = pickPassageRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
+      const sentence = record?.text || "";
       const startAt = Date.now() + 3000;
       const stub = this.env.RACE.get(this.env.RACE.idFromName(raceId));
       const response = await stub.fetch("https://race.internal/init", {
@@ -647,6 +672,7 @@ export class Lobby {
         body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked: rated, kind: raceKind, players }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
+      if (record?.id) this.rememberLaunch(live, record.id);
       await this.saveRematch(raceId, {
         mode,
         length: lane,

@@ -28,12 +28,17 @@ export function backoffDelay(attempt, base = RETRY_BASE_MS, cap = RETRY_CAP_MS) 
 
 // Config and the ladder are not inputs. A signed-in player stays signed in
 // when those requests fail. Queue, room, and browse need a live lobby socket.
-export function sessionShell({ session, phase, lobbyOpen }) {
+export function sessionShell({ session, phase, lobbyOpen, solo = false, view = "" }) {
   if (session === "unknown") return "loading";
   if (session === "error") return "boot-error";
+  const racing = phase === "countdown" || phase === "race" || phase === "finishing";
+  const holding = phase === "queue" || phase === "room" || phase === "browse";
+  if (solo && racing) return "race";
+  if (view === "stats" && !racing && !holding) return "stats";
+  if (solo && phase === "results") return "solo-results";
   if (session !== "in") return "auth";
   if (phase === "results") return "results";
-  if (phase === "countdown" || phase === "race" || phase === "finishing") return "race";
+  if (racing) return "race";
   if (!lobbyOpen && (phase === "queue" || phase === "room" || phase === "browse")) return "lobby";
   if (phase === "queue") return "queue";
   if (phase === "room") return "room";

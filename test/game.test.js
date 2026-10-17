@@ -24,7 +24,7 @@ import {
 } from "../src/match.js";
 import { commitRating, pairCountsFromRows, planRating, standingLabel } from "../src/rating.js";
 import { saveStatements } from "../src/db.js";
-import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, normalizeCursorText, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
+import { CHARSET, CURSOR_KEYS, cursorCanType, findPassageIssues, isKnownSentence, normalizeCursorText, PASSAGES, passageOk, pickPassage, pickSentence, poolFor } from "../src/sentences.js";
 import {
   applyTyping,
   consumeInput,
@@ -47,37 +47,35 @@ import {
   shouldAutoRetry,
 } from "../public/net.js";
 
-test("sentences stay on the shared keyboard", () => {
-  assert.ok(SENTENCES.some((row) => row.text === "I love Fluxer" && row.cursor));
-  assert.ok(poolFor("cursor").length >= 12);
+test("passages stay inside each ladder's character set", () => {
+  assert.deepEqual(findPassageIssues(PASSAGES), []);
+  assert.ok(poolFor("cursor").length >= 150);
+  assert.ok(poolFor("desktop").length >= 300);
   assert.ok(poolFor("desktop").length > poolFor("cursor").length);
-  for (const row of SENTENCES) {
-    assert.match(row.text, CHARSET);
-    assert.equal(isKnownSentence(row.text), true);
-    if (row.cursor) assert.equal(cursorCanType(row.text), true);
-  }
-  for (let i = 0; i < 30; i++) {
+  const desktopIds = poolFor("desktop").map((row) => row.id).sort();
+  assert.deepEqual(poolFor("mobile").map((row) => row.id).sort(), desktopIds);
+  for (let i = 0; i < 20; i++) {
     assert.equal(isKnownSentence(pickSentence("cursor")), true);
     assert.equal(isKnownSentence(pickSentence("desktop")), true);
   }
 });
 
-test("a passage is one, three, or five known sentences", () => {
+test("a passage is one known text for the sprint, set, or long tier", () => {
   assert.deepEqual(lengthList().map((row) => row.sentences), [1, 3, 5]);
   for (const [id, spec] of Object.entries(LENGTHS)) {
-    for (const mode of ["desktop", "cursor"]) {
+    for (const mode of ["desktop", "mobile", "cursor"]) {
       const text = pickPassage(mode, spec.sentences);
       assert.equal(passageOk(mode, spec.sentences, text), true, `${mode} ${id}`);
       assert.equal(passageOk(mode, spec.sentences, `${text} extra`), false);
       if (mode === "cursor") assert.equal(cursorCanType(text), true);
     }
   }
-  assert.equal(passageOk("cursor", 1, pickSentence("cursor")), true);
-  assert.equal(passageOk("desktop", 1, "I love Fluxer"), true);
+  assert.equal(pickPassage("desktop", 2), "");
+  assert.equal(passageOk("desktop", 1, "I love Fluxer"), false);
   assert.equal(passageOk("cursor", 1, "Fluxer started as a high school project."), false);
-  const joined = ["I love Fluxer", "Flux means change.", "Chat is motion."].join(" ");
-  assert.equal(passageOk("cursor", 3, joined), true);
-  assert.equal(passageOk("cursor", 1, joined), false);
+  const sprint = pickPassage("desktop", 1);
+  assert.equal(passageOk("desktop", 5, sprint), false);
+  assert.equal(passageOk("cursor", 1, pickSentence("cursor")), true);
 });
 
 test("the open room list counts racers who are still waiting", () => {
@@ -737,6 +735,15 @@ test("session state follows /api/me and ignores config", () => {
   assert.equal(sessionShell({ session: "in", phase: "race", lobbyOpen: false }), "race");
   assert.equal(sessionShell({ session: "in", phase: "countdown", lobbyOpen: false }), "race");
   assert.equal(sessionShell({ session: "in", phase: "results", lobbyOpen: false }), "results");
+  assert.equal(sessionShell({ session: "out", phase: "race", lobbyOpen: true, solo: true }), "race");
+  assert.equal(sessionShell({ session: "out", phase: "results", lobbyOpen: false, solo: true }), "solo-results");
+  assert.equal(sessionShell({ session: "out", phase: "lobby", lobbyOpen: false, view: "stats" }), "stats");
+  assert.equal(sessionShell({ session: "out", phase: "race", lobbyOpen: true, view: "stats" }), "auth");
+  assert.equal(sessionShell({ session: "in", phase: "lobby", lobbyOpen: false, view: "stats" }), "stats");
+  assert.equal(sessionShell({ session: "in", phase: "queue", lobbyOpen: true, view: "stats" }), "queue");
+  assert.equal(sessionShell({ session: "out", phase: "results", lobbyOpen: false, solo: true, view: "stats" }), "stats");
+  assert.equal(sessionShell({ session: "in", phase: "results", lobbyOpen: false, view: "stats" }), "stats");
+  assert.equal(sessionShell({ session: "in", phase: "race", lobbyOpen: false, view: "stats" }), "race");
 });
 
 test("automatic retries cover network failures and server errors", () => {
