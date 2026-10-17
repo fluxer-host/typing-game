@@ -42,7 +42,8 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 12px 16px;
   padding: 22px 0 18px;
 }
 
@@ -50,19 +51,37 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 160px;
   color: inherit;
   text-decoration: none;
 }
 
 .mark { width: 32px; height: 32px; }
 
-.brand-name { font-weight: 700; letter-spacing: -0.03em; font-size: 1.15rem; }
+.brand-name {
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-size: 1.15rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .brand-name span { color: var(--flux-2); font-weight: 600; }
 
-.account { display: flex; align-items: center; gap: 10px; }
+.account {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
 
-.who { display: flex; align-items: center; gap: 8px; }
+.who { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+
+.who strong, .tag { overflow-wrap: anywhere; }
 
 .avatar, .initial {
   width: 32px;
@@ -108,6 +127,7 @@ button { cursor: pointer; }
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 12px;
+  min-height: 44px;
 }
 
 .mode strong, .length strong { display: block; margin-bottom: 4px; }
@@ -118,7 +138,7 @@ button { cursor: pointer; }
 
 .mode.selected, .length.selected { border-color: var(--flux-edge); box-shadow: inset 0 0 0 1px var(--flux-edge); }
 
-.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 
 .btn, .key {
   border: 1px solid var(--line);
@@ -127,6 +147,8 @@ button { cursor: pointer; }
   border-radius: 10px;
   padding: 10px 14px;
 }
+
+.btn { min-height: 44px; }
 
 a.btn { text-decoration: none; }
 
@@ -138,7 +160,7 @@ a.btn { text-decoration: none; }
 
 .lead { font-size: 1.4rem; margin: 0 0 8px; letter-spacing: -0.03em; }
 
-.join { display: flex; gap: 8px; margin-top: 14px; }
+.join { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; min-width: 0; max-width: 100%; }
 
 .join input, .dev input {
   background: var(--bg);
@@ -147,6 +169,10 @@ a.btn { text-decoration: none; }
   padding: 10px 12px;
   min-width: 0;
 }
+
+.join input { flex: 1 1 8rem; width: 8rem; }
+
+.join .btn, .account .btn, #leave-race { flex: 0 0 auto; }
 
 .code {
   font-family: var(--mono);
@@ -192,7 +218,10 @@ a.btn { text-decoration: none; }
 .race-top, .result-actions, .actions, .account, .join, .dev {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .race-top { justify-content: space-between; margin-bottom: 14px; }
@@ -200,12 +229,15 @@ a.btn { text-decoration: none; }
 .pill {
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 6px 12px;
   color: var(--muted);
   font-size: 0.82rem;
+  line-height: 1.35;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
-.stats { font-family: var(--mono); color: var(--flux-2); }
+.stats { font-family: var(--mono); color: var(--flux-2); min-width: 0; overflow-wrap: anywhere; }
 
 .passage-wrap { position: relative; min-height: 140px; }
 
@@ -280,7 +312,7 @@ a.btn { text-decoration: none; }
 
 .tap-type[hidden] { display: none; }
 
-.keyboard { margin-top: 18px; display: grid; gap: 6px; user-select: none; touch-action: manipulation; }
+.keyboard { margin-top: 18px; display: grid; gap: 6px; min-width: 0; max-width: 100%; user-select: none; touch-action: manipulation; }
 
 .row { display: flex; justify-content: center; gap: 6px; }
 
@@ -317,17 +349,23 @@ tr.me { background: rgba(70, 65, 217, 0.16); }
 .up { color: var(--good); }
 .down { color: var(--bad); }
 
-.side { display: grid; gap: 12px; }
+.side { display: grid; gap: 12px; min-width: 0; }
 
 #lanes:empty { display: none; }
 
-.side section { padding: 14px; }
+.side section { padding: 14px; min-width: 0; }
+
+.panel-you { min-height: 168px; }
+
+.panel-board { min-height: 220px; }
+
+.panel-recent { min-height: 140px; }
 
 .side h2 { margin: 0 0 8px; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 
-.lane { display: grid; grid-template-columns: 92px 1fr auto; gap: 8px; align-items: center; margin: 7px 0; }
+.lane { display: grid; grid-template-columns: minmax(0, 92px) minmax(0, 1fr) auto; gap: 8px; align-items: center; margin: 7px 0; min-width: 0; }
 
-.lane b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 .track { height: 8px; background: var(--track); border-radius: 99px; overflow: hidden; }
 
@@ -431,10 +469,32 @@ button:focus-visible, a:focus-visible, input:focus-visible,
 #race-note { margin: 8px 0 0; }
 
 @media (max-width: 860px) {
-  .layout, .modes { grid-template-columns: 1fr; }
+  .layout, .modes { grid-template-columns: minmax(0, 1fr); }
+  .layout, .stage, .side, .app { min-width: 0; }
   .passage { font-size: 1.25rem; }
   .app { width: min(1120px, calc(100% - 20px)); }
+  .stage { min-height: 880px; }
+  .race-top .pill { flex: 1 1 100%; }
   .key { height: 44px; }
+}
+
+@media (max-width: 540px) {
+  .top { min-height: 140px; }
+}
+
+@media (max-width: 720px) {
+  .keyboard .row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(32px, 1fr));
+  }
+  .keyboard .key,
+  .keyboard .key.wide,
+  .keyboard .key.space {
+    flex: none;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

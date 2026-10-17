@@ -7,6 +7,17 @@ export const CURSOR_KEYS = "1234567890-qwertyuiopasdfghjkl'zxcvbnm,.? ";
 
 export const CHARSET = /^[A-Za-z0-9 .,?'-]+$/;
 
+// Curly quotes and dashes become the plain marks the cursor keys can type.
+// A straight double quote is the plain equivalent of a curly one, and it is
+// still not on the cursor board, so a passage that needs it fails the pool test.
+export function normalizeCursorText(text) {
+  return String(text ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-");
+}
+
 export const SENTENCES = [
   { text: "I love Fluxer", cursor: true },
   { text: "The flux capacitor is fluxing.", cursor: true },
@@ -56,8 +67,12 @@ export const SENTENCES = [
 ];
 
 export function poolFor(mode) {
-  if (mode === "cursor") return SENTENCES.filter((row) => row.cursor);
-  return SENTENCES;
+  const rows = mode === "cursor" ? SENTENCES.filter((row) => row.cursor) : SENTENCES;
+  if (mode !== "cursor") return rows;
+  return rows.map((row) => {
+    const text = normalizeCursorText(row.text);
+    return text === row.text ? row : { ...row, text };
+  });
 }
 
 export function pickSentence(mode) {
@@ -98,11 +113,12 @@ export function passageOk(mode, count, sentence) {
 }
 
 export function isKnownSentence(text) {
-  return SENTENCES.some((row) => row.text === text);
+  return SENTENCES.some((row) => row.text === text || (row.cursor && normalizeCursorText(row.text) === text));
 }
 
 export function cursorCanType(text) {
-  for (const ch of text) {
+  const normalized = normalizeCursorText(text);
+  for (const ch of normalized) {
     if (ch >= "A" && ch <= "Z") {
       if (!CURSOR_KEYS.includes(ch.toLowerCase())) return false;
     } else if (!CURSOR_KEYS.includes(ch)) {

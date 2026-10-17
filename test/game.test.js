@@ -24,7 +24,7 @@ import {
 } from "../src/match.js";
 import { commitRating, pairCountsFromRows, planRating, standingLabel } from "../src/rating.js";
 import { saveStatements } from "../src/db.js";
-import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
+import { CHARSET, CURSOR_KEYS, cursorCanType, isKnownSentence, normalizeCursorText, passageOk, pickPassage, pickSentence, poolFor, SENTENCES } from "../src/sentences.js";
 import {
   applyTyping,
   consumeInput,
@@ -95,6 +95,41 @@ test("the open room list counts racers who are still waiting", () => {
   assert.equal(rooms[0].players.find((player) => player.host).name, "Cam");
   assert.equal(rooms[1].players[0].name, "Ada");
   assert.equal(Object.hasOwn(rooms[0].players[0], "elo"), false);
+});
+
+test("every character in a ladder pool is typable on that ladder", () => {
+  for (const mode of ["desktop", "mobile", "cursor"]) {
+    const seen = new Set();
+    for (const row of poolFor(mode)) {
+      assert.equal(typeof row.text, "string");
+      for (const ch of row.text) seen.add(ch);
+      if (mode === "cursor") assert.equal(cursorCanType(row.text), true, row.text);
+      else assert.match(row.text, CHARSET, row.text);
+    }
+    for (const ch of seen) {
+      if (mode === "cursor") {
+        const key = ch >= "A" && ch <= "Z" ? ch.toLowerCase() : ch;
+        assert.equal(CURSOR_KEYS.includes(key), true, `${mode} pool uses ${JSON.stringify(ch)}`);
+      } else {
+        assert.match(ch, CHARSET, `${mode} pool uses ${JSON.stringify(ch)}`);
+      }
+    }
+    assert.ok(seen.has(" "), `${mode} pool includes a space`);
+  }
+  assert.equal(normalizeCursorText("\u201CHi\u201D \u2014 it\u2019s\u00A0ok"), '"Hi" - it\'s ok');
+  assert.equal(cursorCanType("it\u2019s fine\u2014really"), true);
+  assert.equal(cursorCanType("\u2014"), true);
+  assert.equal(cursorCanType("!"), false);
+  assert.equal(cursorCanType(";"), false);
+  assert.equal(cursorCanType(":"), false);
+  assert.equal(cursorCanType('"'), false);
+  assert.equal(cursorCanType("("), false);
+  assert.equal(cursorCanType(")"), false);
+  assert.equal(cursorCanType("é"), false);
+  assert.equal(cursorCanType("\u201C"), false);
+  const served = pickPassage("cursor", 5);
+  assert.equal(cursorCanType(served), true);
+  assert.equal(passageOk("cursor", 5, served), true);
 });
 
 test("the cursor keyboard in the page covers every cursor key", () => {

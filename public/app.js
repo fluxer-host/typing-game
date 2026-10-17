@@ -6,6 +6,7 @@ import {
   textUnits,
 } from "./input.js";
 import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
+import { raceKeyPlan } from "./keys.js";
 import {
   LOBBY_RETRY_BASE_MS,
   LOBBY_RETRY_CAP_MS,
@@ -2157,26 +2158,20 @@ function resumeRace() {
 
 document.addEventListener("keydown", (event) => {
   if (state.forfeitConfirm || racedOut()) return;
-  if (state.mode === "cursor") {
-    if ((state.phase === "race" || state.phase === "countdown") && (event.key.length === 1 || event.key === "Backspace" || event.key === " ")) {
-      event.preventDefault();
-    }
-    return;
-  }
-  // The focused capture field owns inserts and deletes. This covers a desktop
-  // race whose hidden field is not the target yet, so a physical key still counts.
-  if (state.mode !== "desktop") return;
-  if (state.phase !== "race" && state.phase !== "countdown") return;
-  if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
-  if (event.target?.id === "capture") return;
-  if (event.target?.matches?.("input, textarea, button, a, select")) return;
-  if (event.key === "Backspace") {
-    event.preventDefault();
-    backspace();
-  } else if (event.key.length === 1) {
-    event.preventDefault();
-    typeChar(event.key);
-  }
+  const active = state.phase === "race" || state.phase === "countdown";
+  const target = event.target;
+  const plan = raceKeyPlan(event, {
+    mode: state.mode,
+    active,
+    fromCapture: target?.id === "capture",
+    fromField: Boolean(target?.matches?.("input, textarea, button, a, select")),
+  });
+  if (!plan.prevent) return;
+  event.preventDefault();
+  // Cursor typing goes through the on-screen keys. Desktop still takes a
+  // physical key when the hidden capture field is not the target yet.
+  if (plan.effect === "backspace") backspace();
+  else if (plan.effect === "type") typeChar(event.key);
 });
 
 document.addEventListener("visibilitychange", () => {
