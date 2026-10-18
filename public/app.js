@@ -122,6 +122,7 @@ import {
   RETRY_LIMIT,
   backoffDelay,
   classifyMe,
+  headerSignIn,
   lobbyDrop,
   nextRaceRetry,
   sessionShell,
@@ -1705,30 +1706,79 @@ function localLane() {
 function renderAccount() {
   const slot = document.getElementById("account");
   slot.replaceChildren();
-  if (!state.me) return;
-  const who = h("div", { class: "who" });
-  who.append(avatarNode(state.me));
-  const names = h("div", {});
-  names.append(h("strong", { text: state.me.name }));
-  if (state.me.tag && state.me.tag !== state.me.name) names.append(h("div", { class: "tag", text: state.me.tag }));
-  who.append(names);
-  slot.append(who);
-  slot.append(h("button", {
-    class: "btn ghost",
-    type: "button",
-    text: "Sign out",
-    onclick: async () => {
-      try {
-        await sync.flush();
-        await api("/auth/logout", { method: "POST" });
-      } catch {
-        toast("Could not sign out. Try again.");
-        return;
-      }
-      dropLocalSession();
-    },
-  }));
   slot.className = "account";
+  if (state.session === "in" && state.me) {
+    const who = h("div", { class: "who" });
+    who.append(avatarNode(state.me));
+    const names = h("div", {});
+    names.append(h("strong", { text: state.me.name }));
+    if (state.me.tag && state.me.tag !== state.me.name) names.append(h("div", { class: "tag", text: state.me.tag }));
+    who.append(names);
+    slot.append(who);
+    slot.append(h("button", {
+      class: "btn ghost",
+      type: "button",
+      text: "Sign out",
+      onclick: async () => {
+        try {
+          await sync.flush();
+          await api("/auth/logout", { method: "POST" });
+        } catch {
+          toast("Could not sign out. Try again.");
+          return;
+        }
+        dropLocalSession();
+      },
+    }));
+    return;
+  }
+  const choice = headerSignIn({
+    session: state.session,
+    oauth: Boolean(state.config?.oauth),
+    devLogin: Boolean(state.config?.devLogin),
+  });
+  if (choice === "oauth") {
+    slot.append(h("a", {
+      id: "sign-in",
+      class: "btn primary",
+      href: "/auth/login",
+      text: "Sign in",
+      onclick: (event) => {
+        if (!state.invite?.code) return;
+        const saved = savePendingRoom(safeStorage(), state.invite.code, Date.now());
+        if (!saved) {
+          event.preventDefault();
+          toast("This browser did not keep the room code. Copy it, then sign in.");
+        }
+      },
+    }));
+  } else if (choice === "dev") {
+    slot.append(h("button", {
+      id: "sign-in",
+      class: "btn primary",
+      type: "button",
+      text: "Sign in",
+      onclick: focusDevLogin,
+    }));
+  }
+}
+
+function focusDevLogin() {
+  const focus = () => document.getElementById("dev-name")?.focus();
+  const away = state.route === "stats" || state.route === "ladder";
+  if (away && location.hash) {
+    window.addEventListener("hashchange", function onHash() {
+      window.removeEventListener("hashchange", onHash);
+      focus();
+    });
+    location.hash = "";
+    return;
+  }
+  if (away) {
+    state.route = "";
+    ensure();
+  }
+  focus();
 }
 
 function renderSide() {

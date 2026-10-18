@@ -47,6 +47,16 @@ export function sessionShell({ session, phase, lobbyOpen, solo = false, view = "
   return "lobby";
 }
 
+// Header control. "account" is the signed-in name. "pending" waits for the
+// session check so a signed-in player does not flash a Sign in button.
+export function headerSignIn({ session, oauth = false, devLogin = false } = {}) {
+  if (session === "in") return "account";
+  if (session !== "out" && session !== "error") return "pending";
+  if (oauth) return "oauth";
+  if (devLogin) return "dev";
+  return "hidden";
+}
+
 // "in" and "out" are settled. "error" means the session is still unknown.
 export function classifyMe(result) {
   if (!result || typeof result !== "object") return "error";

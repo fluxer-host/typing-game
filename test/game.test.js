@@ -43,6 +43,7 @@ import {
   classifyMe,
   lobbyDrop,
   nextRaceRetry,
+  headerSignIn,
   sessionShell,
   shouldAutoRetry,
 } from "../public/net.js";
@@ -758,6 +759,13 @@ test("session state follows /api/me and ignores config", () => {
   assert.equal(sessionShell({ session: "out", phase: "results", lobbyOpen: false, solo: true, view: "stats" }), "stats");
   assert.equal(sessionShell({ session: "in", phase: "results", lobbyOpen: false, view: "stats" }), "stats");
   assert.equal(sessionShell({ session: "in", phase: "race", lobbyOpen: false, view: "stats" }), "race");
+  assert.equal(headerSignIn({ session: "unknown", oauth: true }), "pending");
+  assert.equal(headerSignIn({ session: "in", oauth: true }), "account");
+  assert.equal(headerSignIn({ session: "out", oauth: true }), "oauth");
+  assert.equal(headerSignIn({ session: "error", oauth: true, devLogin: true }), "oauth");
+  assert.equal(headerSignIn({ session: "out", devLogin: true }), "dev");
+  assert.equal(headerSignIn({ session: "out" }), "hidden");
+  assert.equal(headerSignIn({ session: "error" }), "hidden");
 });
 
 test("automatic retries cover network failures and server errors", () => {
