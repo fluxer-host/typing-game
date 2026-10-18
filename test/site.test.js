@@ -150,6 +150,6 @@ test("config can be cached briefly and the boot fetches stay parallel", () => {
   const response = config({});
   assert.equal(response.headers.get("cache-control"), "private, max-age=60");
   const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.match(app, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\)\]\)/);
+  assert.match(app, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\), pullDaily\(\)\]\)/);
   assert.equal(app.includes("document.title = host"), false);
 });

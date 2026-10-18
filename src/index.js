@@ -1,5 +1,7 @@
 import { board, config, health, me, races } from "./api.js";
 import { callback, devLogin, login, logout } from "./auth.js";
+import { dailyBoard, dailyStart, dailySubmit } from "./daily-http.js";
+import { purgeDaily } from "./daily-store.js";
 import { purgeExpiredSessions } from "./db.js";
 import { json } from "./http.js";
 import { Lobby } from "./lobby.js";
@@ -33,6 +35,9 @@ export default {
       if (request.method === "GET" && path === "/api/me/races") return races(request, env);
       if (request.method === "GET" && path === "/api/me") return me(request, env);
       if (request.method === "GET" && path === "/api/leaderboard") return board(request, env);
+      if (request.method === "GET" && path === "/api/daily") return dailyBoard(request, env);
+      if (request.method === "POST" && path === "/api/daily/start") return dailyStart(request, env);
+      if (request.method === "POST" && path === "/api/daily/submit") return dailySubmit(request, env);
       if (request.method === "GET" && path === "/auth/login") return login(request, env);
       if (request.method === "GET" && path === "/auth/callback") return callback(request, env);
       if (request.method === "POST" && path === "/auth/logout") return logout(request, env);
@@ -59,6 +64,12 @@ export default {
       console.log(JSON.stringify({ event: "sessions_purged", removed }));
     } catch (error) {
       console.error("session purge failed", error);
+    }
+    try {
+      const daily = await purgeDaily(env);
+      console.log(JSON.stringify({ event: "daily_purged", ...daily }));
+    } catch (error) {
+      console.error("daily purge failed", error);
     }
   },
 };

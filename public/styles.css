@@ -562,6 +562,62 @@ button:focus-visible, a:focus-visible, input:focus-visible,
 
 .versus-outcome { font-size: 1.15rem; margin: 8px 0; }
 
+.daily {
+  min-width: 0;
+  max-width: 100%;
+  margin: 16px 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+
+.daily h2 {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--text);
+}
+
+.daily-meta, .daily-you { margin: 6px 0; }
+
+.daily-count {
+  margin: 6px 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.daily-table {
+  width: 100%;
+  max-width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.daily-table caption {
+  margin: 0 0 6px;
+  text-align: left;
+  font-weight: 650;
+  color: var(--text);
+  caption-side: top;
+}
+
+.daily-table th:nth-child(1),
+.daily-table td:nth-child(1) { width: 3.2rem; }
+
+.daily-table th:nth-child(3),
+.daily-table td:nth-child(3) { width: 4.4rem; }
+
+.daily-table th:nth-child(4),
+.daily-table td:nth-child(4) { width: 5.2rem; }
+
+.daily-table th,
+.daily-table td { overflow-wrap: anywhere; }
+
 .forfeit {
   margin-top: 12px;
   padding: 12px 14px;

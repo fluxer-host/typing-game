@@ -51,6 +51,7 @@ export function soloStart({ mode, length, me, now, avoid = [], passageId = "", s
     live: [{ id: player.id, i: 0, wpm: 0, finishedAt: null }],
     results: null,
     versus: null,
+    daily: null,
     forfeitConfirm: false,
     forfeitedLocally: false,
     rematch: null,

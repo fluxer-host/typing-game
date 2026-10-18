@@ -29,6 +29,8 @@ Passages are original prose. Desktop and Mobile share one pool. Cursor passages 
 
 From the home screen, Race a bot runs a seeded opponent at a chosen pace, and Race your ghost replays your best finish for that ladder and length. Both are practice. They stay in this browser and do not change Elo or the leaderboard. The ranked queue still pairs two people.
 
+The daily challenge is one shared set passage per ladder for the UTC day. The first signed-in finish that day is the score. Later runs are practice. The server times the attempt and checks each step with the same progress rules as a ranked race. The score does not change Elo. Apply `migrations/0002_daily.sql` before deploying a Worker that serves `/api/daily`.
+
 ## Local play
 
 Wrangler 4 needs Node.js 22 or newer.

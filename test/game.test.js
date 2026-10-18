@@ -924,7 +924,7 @@ test("an input event supplies the character when beforeinput has no data", () =>
 
 test("the page keeps a signed-in shell independent of config and guards a second start", () => {
   const src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.match(src, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\)\]\)/);
+  assert.match(src, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\), pullDaily\(\)\]\)/);
   assert.equal(src.includes("raceTries > 3"), false);
   assert.match(src, /playLock/);
   assert.match(src, /nextRaceRetry/);

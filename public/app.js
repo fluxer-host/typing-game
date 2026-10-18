@@ -15,6 +15,7 @@ import {
   appendRun,
   buildStatsModel,
   displayStanding,
+  ladderName,
   loadHistory,
   practiceTitle,
   recentLabel,
@@ -38,6 +39,22 @@ import {
 } from "./ghost.js";
 import { botOpponent, compareRace, ghostOpponent } from "./versus.js";
 import { appendVersus, renderVersusResults } from "./versus-view.js";
+import { DAILY_CARD_LIMIT, DAILY_MAX_STEPS, formatUtcDay } from "../src/daily.js";
+import {
+  browserStorage,
+  countdownText,
+  dailyAnnounce,
+  dailyBoardPath,
+  dailyClockDay,
+  dailyMeta,
+  dailyYouText,
+  fetchDaily,
+  loadDailyLocal,
+  noteDailyStep,
+  rejectCopy,
+  rememberDailyLocal,
+} from "./daily.js";
+import { appendDaily, fillDaily, renderDailyResults } from "./daily-view.js";
 import {
   LOBBY_RETRY_BASE_MS,
   LOBBY_RETRY_CAP_MS,
@@ -150,6 +167,12 @@ const state = {
   botWpm: 55,
   ghosts: loadGhosts(),
   localRuns: loadHistory(),
+  daily: null,
+  dailyBoards: {},
+  dailyOffset: 0,
+  dailyLocal: loadDailyLocal(browserStorage()),
+  dailyError: "",
+  dailyPullDay: "",
   route: typeof location !== "undefined" && location.hash === "#/stats" ? "stats" : "",
   clearConfirm: false,
 };
@@ -385,6 +408,7 @@ function authView() {
     onMode: chooseMode,
     onLength: chooseLength,
   });
+  appendDaily(box, h, { onPlay: () => beginDaily() });
   const actions = h("div", { class: "actions" });
   actions.append(h("button", {
     class: "btn primary",
@@ -418,6 +442,7 @@ function authView() {
         clearRetry("me");
         await Promise.allSettled([pullBoard(), pullRecent()]);
         ensure();
+        pullDaily();
         resumeRace();
       } catch (error) {
         toast(error.message === "name" ? "Use 2-24 letters for the local name." : "Could not open a local account.");
@@ -450,6 +475,7 @@ function lobbyView() {
       return `${Math.round(elo ?? 1000)} elo${best ? ` · best ${best} wpm` : ""}`;
     },
   });
+  appendDaily(box, h, { onPlay: () => beginDaily() });
   box.append(h("div", { id: "config-note", hidden: true }));
   const actions = h("div", { class: "actions" });
   const play = () => ({ mode: state.mode, length: state.length });
@@ -628,7 +654,7 @@ function raceView() {
     hidden: true,
   }));
   const top = h("div", { class: "race-top" });
-  const raceLength = lengthInfo(state.length)?.title || "Sprint";
+  const raceLength = state.daily ? "Set" : (lengthInfo(state.length)?.title || "Sprint");
   top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${racePillText()}` }));
   top.append(h("span", { class: "stats", id: "stats", text: "" }));
   top.append(h("button", {
@@ -978,6 +1004,7 @@ function raceStandingWord() {
 }
 
 function racePillText() {
+  if (state.daily) return state.daily.practice ? "Daily practice" : "Daily challenge";
   if (state.versus?.kind === "bot" || state.versus?.kind === "ghost") {
     return practiceTitle({ opponent: state.versus.kind });
   }
@@ -1016,6 +1043,7 @@ function paintDynamic() {
     paintModes();
     paintLengths();
     paintVersus();
+    paintDaily();
   }
   if (state.shell === "stats") paintStatsPage();
   if (state.shell === "queue") {
@@ -1213,6 +1241,11 @@ function paintRaceNote() {
   const others = state.live.filter((row) => row.id !== selfId());
   let text = "";
   if (mine?.status === "timeout" || mine?.status === "disconnect") text = "You timed out.";
+  else if (state.daily) {
+    text = state.daily.practice
+      ? "Practice. This run does not change today's score."
+      : "This finish is the scored attempt for today.";
+  }
   else if (others.some((row) => row.status === "forfeit" || row.status === "disconnect")) text = "Opponent left.";
   else if (others.some((row) => row.status === "timeout")) text = "Opponent timed out.";
   else if (others.some((row) => row.status === "away")) text = "Opponent reconnecting.";
@@ -1445,10 +1478,12 @@ function commitTyping(effect) {
   for (const step of result.steps) {
     state.typed = step.text;
     if (step.kind === "fin") state.phase = "finishing";
+    if (state.daily && !state.daily.practice) noteDailyStep(state.daily.steps, step.text, DAILY_MAX_STEPS);
     publish(step.kind, step.text);
   }
   if (state.localPractice && state.phase === "finishing") {
-    finishSolo();
+    if (state.daily) finishDailyRace();
+    else finishSolo();
     return;
   }
   paintPassage();
@@ -1558,7 +1593,7 @@ function paintLanes() {
   const racing = state.shell === "race" || state.shell === "results";
   root.replaceChildren();
   if (!racing) return;
-  root.append(h("h2", { text: state.versus ? "Practice" : "Room" }));
+  root.append(h("h2", { text: state.daily ? "Daily" : state.versus ? "Practice" : "Room" }));
   const total = Math.max(1, state.sentence.length);
   const rows = state.players.map((player) => {
     const live = state.live.find((row) => row.id === player.id) || { i: 0, wpm: 0, finishedAt: null };
@@ -1597,7 +1632,9 @@ function chooseMode(mode) {
   rememberPreference("tg_mode", mode);
   paintModes();
   paintVersus();
+  paintDaily();
   pullBoard();
+  pullDaily();
 }
 
 function chooseLength(length) {
@@ -2101,6 +2138,7 @@ function exitToLobby() {
   state.soloRun = null;
   state.versus = null;
   state.trace = [];
+  state.daily = null;
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
@@ -2290,6 +2328,7 @@ function stopHold() {
 }
 
 setInterval(watchSockets, 250);
+setInterval(tickDaily, 1000);
 
 setInterval(() => {
   if (state.shell !== "race") return;
@@ -2505,6 +2544,7 @@ function dropLocalSession() {
   state.soloRun = null;
   state.versus = null;
   state.trace = [];
+  state.daily = null;
   state.phase = "lobby";
   state.results = null;
   state.players = [];
@@ -2705,6 +2745,257 @@ function tickVersus() {
   paintLanes();
 }
 
+let dailyToken = 0;
+
+function dailyCardModel() {
+  const board = state.dailyBoards[state.mode] || null;
+  const local = board ? state.dailyLocal?.runs?.[`${state.mode}|${board.day}`] : null;
+  const now = Date.now() + state.dailyOffset;
+  const played = Boolean(board?.you) || (state.session !== "in" && local);
+  return {
+    meta: board
+      ? dailyMeta(board.ladder, board.difficulty, board.day)
+      : (state.dailyError || "Loading today's challenge."),
+    countdown: board ? countdownText(now, board.nextDayAt) : "Next challenge in 00:00:00",
+    you: board ? dailyYouText({ signedIn: state.session === "in", serverYou: board.you, localRun: local }) : "",
+    playLabel: played ? "Practice again" : "Play",
+    ready: Boolean(board?.passage),
+    caption: board
+      ? `Top ${DAILY_CARD_LIMIT} on ${ladderName(board.ladder)} for ${formatUtcDay(board.day)}`
+      : "Today's top scores",
+    rows: board?.rows || [],
+  };
+}
+
+function paintDaily() {
+  fillDaily(dailyCardModel());
+}
+
+async function pullDaily() {
+  const mode = state.mode;
+  const token = ++dailyToken;
+  try {
+    const result = await fetchDaily(dailyBoardPath(mode, DAILY_CARD_LIMIT));
+    if (token !== dailyToken || mode !== state.mode) return;
+    if (!result.ok || !result.data?.passage) {
+      state.dailyError = "Today's challenge did not load.";
+      paintDaily();
+      return;
+    }
+    state.dailyError = "";
+    state.dailyBoards[mode] = result.data;
+    if (Number.isFinite(result.data.serverNow)) state.dailyOffset = result.data.serverNow - Date.now();
+    paintDaily();
+  } catch {
+    if (token !== dailyToken) return;
+    state.dailyError = "Today's challenge did not load.";
+    paintDaily();
+  }
+}
+
+function tickDaily() {
+  if (state.shell !== "lobby" && state.shell !== "auth") return;
+  const board = state.dailyBoards[state.mode];
+  if (!board) return;
+  const now = Date.now() + state.dailyOffset;
+  const day = dailyClockDay(now);
+  if (day && day !== board.day && state.dailyPullDay !== day) {
+    state.dailyPullDay = day;
+    pullDaily();
+    return;
+  }
+  const node = document.getElementById("daily-countdown");
+  if (node) node.textContent = countdownText(now, board.nextDayAt);
+}
+
+async function beginDaily(options = {}) {
+  try {
+    const ladder = state.mode;
+    const board = state.dailyBoards[ladder];
+    let passage = options.passage || board?.passage || "";
+    let passageId = options.passageId || board?.passageId || "";
+    let day = options.day || board?.day || "";
+    let difficulty = options.difficulty || board?.difficulty || "";
+    let attemptId = null;
+    let practice = Boolean(options.practice || board?.you || state.session !== "in");
+    if (!practice) {
+      const result = await fetchDaily("/api/daily/start", { ladder });
+      if (Number.isFinite(result.data?.serverNow)) state.dailyOffset = result.data.serverNow - Date.now();
+      if (result.ok) {
+        passage = result.data.passage;
+        passageId = result.data.passageId;
+        day = result.data.day;
+        difficulty = result.data.difficulty;
+        attemptId = result.data.attemptId;
+      } else if (result.status === 409 && result.data?.error === "scored") {
+        practice = true;
+        passage = result.data.passage || passage;
+        passageId = result.data.passageId || passageId;
+        if (board && result.data.result) board.you = result.data.result;
+      } else if (result.status === 401 || result.status === 429) {
+        practice = true;
+        if (result.status === 429) toast("Too many starts today. This run is practice.");
+      } else {
+        toast("Today's challenge did not start.");
+        return;
+      }
+    }
+    if (!passage) {
+      toast("Today's passage is still loading.");
+      return;
+    }
+    const patch = soloStart({
+      mode: ladder,
+      length: "set",
+      me: state.me,
+      now: serverNow(),
+      passageId,
+      same: true,
+    });
+    patch.length = state.length;
+    patch.sentence = passage;
+    patch.passageId = passageId;
+    patch.daily = {
+      practice,
+      attemptId,
+      day,
+      ladder,
+      difficulty,
+      steps: [],
+      pending: false,
+      scored: false,
+      rejected: false,
+      server: null,
+      message: "",
+    };
+    if (!openLocalRace(patch, null)) return;
+    announce(practice ? "Go. Daily practice started." : "Go. Daily challenge started.");
+  } catch {
+    toast("Today's challenge did not start.");
+  }
+}
+
+function dailyResultNumbers() {
+  const run = state.soloRun || {};
+  const server = state.daily?.server;
+  if (server && state.daily?.scored) {
+    return {
+      wpm: server.wpm,
+      accuracy: server.accuracy,
+      ms: server.ms,
+      rank: server.rank,
+    };
+  }
+  return { wpm: run.wpm || 0, accuracy: run.accuracy || 0, ms: run.ms || 0, rank: null };
+}
+
+function dailyResultView() {
+  const daily = state.daily || {};
+  const numbers = dailyResultNumbers();
+  const board = state.dailyBoards[daily.ladder] || null;
+  let rankText = "Practice";
+  if (daily.pending) rankText = "Saving";
+  else if (daily.rejected) rankText = "Not saved";
+  else if (daily.scored && numbers.rank) rankText = String(numbers.rank);
+  else if (state.session !== "in") rankText = "Sign in";
+  else if (board?.you?.rank) rankText = `Stays ${board.you.rank}`;
+  let badge = "Practice";
+  if (daily.pending) badge = "Saving";
+  else if (daily.rejected) badge = "Not saved";
+  else if (daily.scored) badge = "Scored attempt";
+  let notice = daily.message || "";
+  if (!notice && daily.pending) notice = "Saving today's score.";
+  else if (!notice && daily.scored) notice = "This is today's score. It does not change Elo.";
+  else if (!notice && state.session !== "in") notice = "Sign in to submit a score. This result stays on this browser.";
+  else if (!notice) notice = "Practice does not change today's score or your rating.";
+  return {
+    badge,
+    notice,
+    sentence: state.sentence,
+    wpm: numbers.wpm,
+    accuracy: numbers.accuracy,
+    ms: numbers.ms,
+    rankText,
+    onAgain: () => beginDaily({
+      practice: true,
+      passage: state.sentence,
+      passageId: state.passageId,
+      day: daily.day,
+      difficulty: daily.difficulty,
+    }),
+    onLobby: () => exitToLobby(),
+  };
+}
+
+function showDailyResults() {
+  state.phase = "results";
+  state.shell = "";
+  ensure();
+}
+
+function finishDailyRace() {
+  if (!state.localPractice || state.soloSaved || !state.daily) return;
+  state.soloSaved = true;
+  const run = soloFinish({
+    sentence: state.sentence,
+    startAt: state.startAt,
+    now: serverNow(),
+    ok: state.ok,
+    err: state.err,
+    mode: state.mode,
+    length: "set",
+    passageId: state.passageId,
+  });
+  state.soloRun = run;
+  const daily = state.daily;
+  if (state.session !== "in") {
+    const remembered = rememberDailyLocal(browserStorage(), state.dailyLocal, {
+      ladder: daily.ladder,
+      day: daily.day,
+      wpm: run.wpm,
+      accuracy: run.accuracy,
+      ms: run.ms,
+      passageId: state.passageId,
+    });
+    state.dailyLocal = remembered.store;
+    if (remembered.kept && !remembered.saved) toast("This browser did not save today's result.");
+  }
+  if (daily.practice || !daily.attemptId) {
+    showDailyResults();
+    return;
+  }
+  daily.pending = true;
+  showDailyResults();
+  fetchDaily("/api/daily/submit", { attemptId: daily.attemptId, steps: daily.steps.slice() })
+    .then((result) => {
+      daily.pending = false;
+      if (result.ok && result.data?.scored) {
+        daily.scored = true;
+        daily.server = result.data;
+      } else if (result.status === 409 && result.data?.error === "scored") {
+        daily.practice = true;
+        daily.message = rejectCopy("scored");
+        if (result.data.result) {
+          const board = state.dailyBoards[daily.ladder];
+          if (board) board.you = result.data.result;
+        }
+      } else {
+        daily.rejected = true;
+        daily.message = rejectCopy(result.data?.reason || result.data?.error);
+      }
+      state.shell = "";
+      ensure();
+      pullDaily();
+    })
+    .catch(() => {
+      daily.pending = false;
+      daily.rejected = true;
+      daily.message = "The score could not be submitted.";
+      state.shell = "";
+      ensure();
+    });
+}
+
 function finishSolo() {
   if (!state.localPractice || state.soloSaved) return;
   state.soloSaved = true;
@@ -2760,6 +3051,20 @@ function versusOutcome() {
 }
 
 function announceSolo() {
+  if (state.daily) {
+    const numbers = dailyResultNumbers();
+    announce(dailyAnnounce({
+      practice: !state.daily.scored,
+      pending: state.daily.pending,
+      rejected: state.daily.rejected,
+      wpm: numbers.wpm,
+      accuracy: numbers.accuracy,
+      ms: numbers.ms,
+      rank: state.daily.scored ? numbers.rank : null,
+      signedIn: state.session === "in",
+    }));
+    return;
+  }
   const run = state.soloRun;
   if (!run) {
     announce("Practice finished.");
@@ -2779,6 +3084,10 @@ function announceSolo() {
 function soloResultsView() {
   const box = h("div", { class: "results" });
   const run = state.soloRun || {};
+  if (state.daily) {
+    renderDailyResults(box, h, dailyResultView());
+    return box;
+  }
   if (state.versus) {
     const outcome = versusOutcome();
     const length = state.sentence.length;
@@ -2900,7 +3209,7 @@ async function boot() {
   if (!MODES[state.mode]) state.mode = "desktop";
   ensureNetBanner();
   try {
-    await Promise.allSettled([pullMe(), pullConfig(), pullBoard()]);
+    await Promise.allSettled([pullMe(), pullConfig(), pullBoard(), pullDaily()]);
     ensure();
     if (state.session === "in" && params.get("room") && !sessionStorage.getItem("tg_race")) {
       sendLobby({ t: "room_join", code: params.get("room") });
