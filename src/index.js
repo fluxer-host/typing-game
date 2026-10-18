@@ -8,6 +8,7 @@ import { Lobby } from "./lobby.js";
 import { websocketOriginAllowed } from "./origin.js";
 import { Race } from "./race.js";
 import { shareGet, shareIssue } from "./share.js";
+import { settingsGet, settingsPut } from "./settings-http.js";
 
 export { Lobby, Race };
 
@@ -35,6 +36,8 @@ export default {
       if (request.method === "GET" && path === "/api/config") return config(env);
       if (request.method === "GET" && path === "/api/me/races") return races(request, env);
       if (request.method === "GET" && path === "/api/me") return me(request, env);
+      if (request.method === "GET" && path === "/api/settings") return settingsGet(request, env);
+      if (request.method === "PUT" && path === "/api/settings") return settingsPut(request, env);
       if (request.method === "GET" && path === "/api/leaderboard") return board(request, env);
       if (request.method === "GET" && path === "/api/daily") return dailyBoard(request, env);
       if (request.method === "POST" && path === "/api/daily/start") return dailyStart(request, env);

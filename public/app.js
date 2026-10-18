@@ -14,6 +14,13 @@ import {
   stepLiveTrack,
 } from "./live-stats.js";
 import { punctuationAllowed, readDurationMs, readFormat } from "../src/formats.js";
+import {
+  SETTINGS_FAIL_MESSAGE,
+  controlsLocked,
+  liveFields,
+  openingSettings,
+  raceInProgress,
+} from "../src/settings.js";
 import { lengthList } from "../src/lengths.js";
 import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
 import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
@@ -25,16 +32,15 @@ import {
   choiceFor,
   CURSOR_PUNCTUATION_NOTE,
   formatSummary,
-  loadFormatChoice,
   presentTimedSteps,
   raceMetaFor,
   rememberRaceMeta,
   remainingMs,
   resultFormatLine,
-  saveFormatChoice,
   timedHeadline,
   timerModel,
 } from "./race-format.js";
+import { createSettingsSync } from "./settings.js";
 import {
   appendRun,
   buildStatsModel,
@@ -181,19 +187,8 @@ function initialRoute() {
 
 const initial = initialRoute();
 
-function openingFormat() {
-  const choice = loadFormatChoice();
-  let mode = "desktop";
-  try {
-    mode = localStorage.getItem("tg_mode") || "desktop";
-  } catch {
-    mode = "desktop";
-  }
-  if (choice.format === "punctuation" && !punctuationAllowed(mode)) return choiceFor("passage", 0);
-  return choice;
-}
-
-const opening = openingFormat();
+const opening = liveFields(openingSettings(browserStorage()));
+let prefs = opening.settings;
 
 const state = {
   config: null,
@@ -201,10 +196,10 @@ const state = {
   recent: [],
   board: [],
   boardYou: null,
-  mode: localStorage.getItem("tg_mode") || "desktop",
-  length: localStorage.getItem("tg_length") || "sprint",
+  mode: opening.mode,
+  length: opening.length,
   format: opening.format,
-  durationMs: opening.format === "timed" ? opening.durationMs : 0,
+  durationMs: opening.durationMs,
   phase: "lobby",
   sentence: "",
   typed: "",
@@ -310,12 +305,24 @@ function h(tag, props, kids) {
   return node;
 }
 
-function announce(text) {
+function announce(text, options = {}) {
   const message = String(text || "").trim();
-  if (!message || message === lastLive) return;
-  lastLive = message;
   const node = document.getElementById("live");
-  if (node) node.textContent = message;
+  if (!message) return;
+  const visible = Boolean(options.visible);
+  if (message === lastLive && (!visible || node?.classList.contains("live-visible"))) return;
+  lastLive = message;
+  if (!node) return;
+  node.textContent = message;
+  node.classList.toggle("live-visible", visible);
+}
+
+function clearSettingsNotice() {
+  const node = document.getElementById("live");
+  if (!node || node.textContent !== SETTINGS_FAIL_MESSAGE) return;
+  node.textContent = "";
+  node.classList.remove("live-visible");
+  if (lastLive === SETTINGS_FAIL_MESSAGE) lastLive = "";
 }
 
 function toast(text) {
@@ -434,6 +441,7 @@ function modeElo() {
 }
 
 function ensure() {
+  if (sync.settle() === "reload") return;
   setPageTitle();
   const next = shellName();
   const inviteKey = state.invite ? `${state.invite.status}:${state.invite.code || ""}` : "";
@@ -1711,6 +1719,7 @@ function renderAccount() {
     text: "Sign out",
     onclick: async () => {
       try {
+        await sync.flush();
         await api("/auth/logout", { method: "POST" });
       } catch {
         toast("Could not sign out. Try again.");
@@ -1802,11 +1811,16 @@ function formatControls() {
 }
 
 function chooseFormat(info) {
-  if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (controlsLocked(state)) return;
   if (!info || (info.format === "punctuation" && !punctuationAllowed(state.mode))) return;
   state.format = info.format;
-  state.durationMs = info.format === "timed" ? info.durationMs : 0;
-  saveFormatChoice(null, state.format, info.durationMs);
+  if (info.format === "timed") {
+    state.durationMs = info.durationMs;
+    prefs = { ...prefs, durationMs: info.durationMs };
+  } else {
+    state.durationMs = 0;
+  }
+  commitPreference();
   paintFormats();
 }
 
@@ -1824,15 +1838,47 @@ function paintFormats() {
   if (queue) queue.hidden = state.format === "passage";
 }
 
-function restoreFormatChoice() {
-  const choice = loadFormatChoice();
-  if (choice.format === "punctuation" && !punctuationAllowed(state.mode)) {
-    state.format = "passage";
-    state.durationMs = 0;
-    return;
+function restorePreferences() {
+  if (raceInProgress(state)) return;
+  const live = liveFields(prefs);
+  state.mode = live.mode;
+  state.length = live.length;
+  state.format = live.format;
+  state.durationMs = live.durationMs;
+}
+
+function resumePending() {
+  try {
+    return state.session === "in" && Boolean(sessionStorage.getItem("tg_race"));
+  } catch {
+    return false;
   }
-  state.format = choice.format;
-  state.durationMs = choice.format === "timed" ? choice.durationMs : 0;
+}
+
+function adoptSettings(settings) {
+  const live = liveFields(settings);
+  const ladderChanged = live.mode !== state.mode;
+  prefs = live.settings;
+  if (raceInProgress(state) || resumePending()) return;
+  state.mode = live.mode;
+  state.length = live.length;
+  state.format = live.format;
+  state.durationMs = live.durationMs;
+  if (ladderChanged && state.session === "in") {
+    pullBoard();
+    pullDaily();
+  }
+}
+
+function commitPreference() {
+  const durationMs = state.format === "timed" ? state.durationMs || prefs.durationMs : prefs.durationMs;
+  prefs = liveFields({
+    ladder: state.mode,
+    length: state.length,
+    format: state.format,
+    durationMs,
+  }).settings;
+  sync.queue(prefs);
 }
 
 function roomPlay() {
@@ -1931,24 +1977,15 @@ function withRaceMeta(race) {
   return row;
 }
 
-function rememberPreference(key, value) {
-  try {
-    if (value) localStorage.setItem(key, value);
-  } catch {
-    // Private mode can reject storage. The choice still applies for this visit.
-  }
-}
-
 function chooseMode(mode) {
-  if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (controlsLocked(state)) return;
   if (!MODES[mode]) return;
   state.mode = mode;
-  rememberPreference("tg_mode", mode);
   if (state.format === "punctuation" && !punctuationAllowed(mode)) {
     state.format = "passage";
     state.durationMs = 0;
-    saveFormatChoice(null, "passage", 0);
   }
+  commitPreference();
   paintModes();
   paintFormats();
   paintVersus();
@@ -1958,10 +1995,10 @@ function chooseMode(mode) {
 }
 
 function chooseLength(length) {
-  if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (controlsLocked(state)) return;
   if (!lengthInfo(length)) return;
   state.length = length;
-  rememberPreference("tg_length", length);
+  commitPreference();
   paintLengths();
   paintVersus();
 }
@@ -2286,8 +2323,6 @@ function startMatch(msg) {
   heardFinish.clear();
   state.shell = "";
   sessionStorage.setItem("tg_race", msg.raceId);
-  localStorage.setItem("tg_mode", state.mode);
-  if (state.length) localStorage.setItem("tg_length", state.length);
   ensure();
   if (state.phase === "race") announceRaceStart();
   openRace(msg.raceId);
@@ -2504,8 +2539,8 @@ function exitToLobby() {
   state.versus = null;
   state.trace = [];
   state.daily = null;
-  restoreFormatChoice();
   state.phase = "lobby";
+  restorePreferences();
   state.results = null;
   state.sentence = "";
   state.typed = "";
@@ -2788,9 +2823,18 @@ function applyMe(result) {
     ? classifyMe({ ok: true, user: result.data?.user ?? null })
     : classifyMe({ ok: false, status: result.status });
   if (kind === "in") {
+    const same = previous === "in" && state.me?.id === result.data.user.id;
     state.session = "in";
     state.me = result.data.user;
     clearRetry("me");
+    if (!same) {
+      const settings = sync.onSignedIn({
+        saved: result.data?.settingsSaved === true,
+        settings: result.data?.settings,
+        accountId: result.data.user.id,
+      });
+      adoptSettings(settings);
+    }
     if (previous !== "in") pullRecent();
     settleInvite();
     return;
@@ -2896,6 +2940,8 @@ async function refreshProfile() {
 }
 
 function dropLocalSession() {
+  const previousId = state.me?.id || "";
+  sync.onSignedOut(previousId);
   meEpoch += 1;
   clearRetry("me");
   inviteEpoch += 1;
@@ -2933,6 +2979,8 @@ function dropLocalSession() {
   state.raceLink = "up";
   raceLostAt = 0;
   raceTries = 0;
+  prefs = liveFields(openingSettings(browserStorage())).settings;
+  restorePreferences();
   ensure();
 }
 
@@ -3037,8 +3085,6 @@ function openLocalRace(patch, versus) {
   lastNote = "";
   heardLock = false;
   heardFinish.clear();
-  rememberPreference("tg_mode", state.mode);
-  rememberPreference("tg_length", state.length);
   ensure();
   focusCapture();
   return true;
@@ -3534,8 +3580,7 @@ function statsActions() {
       state.clearConfirm = false;
       if (location.hash) location.hash = "";
       state.route = "";
-      rememberPreference("tg_mode", state.mode);
-      rememberPreference("tg_length", state.length);
+      commitPreference();
       beginSolo({
         same: true,
         passageId: run.passageId,
@@ -3778,12 +3823,12 @@ function devLoginForm() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      const data = await api("/auth/dev", {
+      await api("/auth/dev", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: input.value }),
       });
-      await finishDevLogin(data);
+      await finishDevLogin();
     } catch (error) {
       toast(error.message === "name" ? "Use 2-24 letters for the local name." : "Could not open a local account.");
     }
@@ -3791,14 +3836,13 @@ function devLoginForm() {
   return form;
 }
 
-async function finishDevLogin(data) {
-  state.me = data.user;
-  state.session = data.user ? "in" : "out";
-  clearRetry("me");
-  await Promise.allSettled([pullBoard(), pullRecent()]);
+async function finishDevLogin() {
+  await pullMe();
+  if (state.session === "in") {
+    pullBoard();
+    pullDaily();
+  }
   settleInvite();
-  ensure();
-  pullDaily();
   if (state.session === "in" && !state.invite) resumeRace();
 }
 
@@ -4011,6 +4055,18 @@ function requestRoomJoin(raw) {
     toast("The lobby is not connected.");
   }
 }
+
+const sync = createSettingsSync({
+  storage: browserStorage(),
+  signedIn: () => state.session === "in",
+  accountId: () => state.me?.id || "",
+  locked: () => raceInProgress(state),
+  apply: (settings) => adoptSettings(settings),
+  repaint: () => ensure(),
+  reload: () => location.reload(),
+  announce: (text) => announce(text, { visible: true }),
+  clearNotice: () => clearSettingsNotice(),
+});
 
 async function boot() {
   const params = new URLSearchParams(location.search);

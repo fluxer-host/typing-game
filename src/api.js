@@ -7,6 +7,7 @@ import { MODE_LIST } from "./modes.js";
 import { avatarUrl, publicPlayer } from "./profile.js";
 import { standingLabel } from "./rating.js";
 import { shareEnabled } from "./share-token.js";
+import { parseStoredSettings } from "./settings.js";
 
 export function config(env) {
   return json({
@@ -33,7 +34,14 @@ export async function health(env) {
 export async function me(request, env) {
   const resolved = await resolveUser(request, env);
   if (!resolved) return json({ user: null });
-  return json({ user: publicPlayer(resolved.user, env) });
+  const stored = parseStoredSettings(
+    Object.prototype.hasOwnProperty.call(resolved.user, "settings") ? resolved.user.settings : null,
+  );
+  return json({
+    user: publicPlayer(resolved.user, env),
+    settings: stored.settings,
+    settingsSaved: stored.saved,
+  });
 }
 
 function ladderRow(env, row, mode, rank, caller) {

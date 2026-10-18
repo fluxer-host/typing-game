@@ -46,6 +46,18 @@ export async function getUser(env, id) {
   return env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
 }
 
+export async function readSettingsColumn(env, userId) {
+  const row = await env.DB.prepare("SELECT settings FROM users WHERE id = ?").bind(userId).first();
+  if (!row || !Object.prototype.hasOwnProperty.call(row, "settings")) return null;
+  return row.settings ?? null;
+}
+
+export async function writeSettingsColumn(env, userId, text, now = Date.now()) {
+  await env.DB.prepare("UPDATE users SET settings = ?, updated_at = ? WHERE id = ?")
+    .bind(text, now, userId)
+    .run();
+}
+
 export async function getUsers(env, ids) {
   if (!ids.length) return [];
   const marks = ids.map(() => "?").join(", ");

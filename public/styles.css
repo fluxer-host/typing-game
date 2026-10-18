@@ -591,6 +591,27 @@ button:focus-visible, a:focus-visible, input:focus-visible,
   pointer-events: none;
 }
 
+#live.live-visible {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  width: auto;
+  height: auto;
+  max-width: min(28rem, calc(100% - 32px));
+  margin: 0;
+  padding: 8px 12px;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: normal;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-3);
+  color: var(--text);
+  pointer-events: none;
+}
+
 .capture:focus,
 .capture:focus-visible {
   outline: none;

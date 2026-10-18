@@ -4,6 +4,8 @@
 import { CURSOR_PUNCTUATION_NOTE, punctuationAllowed, readDurationMs, readFormat } from "../src/formats.js";
 import { timedHeadline } from "../src/timed.js";
 
+// Legacy device keys. Account preferences live in src/settings.js.
+// A browser that still has these keys is read once into the guest settings.
 export const FORMAT_KEY = "tg_format";
 export const TIMED_KEY = "tg_timed";
 export const RACE_META_KEY = "tg_race_meta_v1";
