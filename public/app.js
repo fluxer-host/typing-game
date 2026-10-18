@@ -48,6 +48,7 @@ import {
 } from "./history.js";
 import { soloFinish, soloStart } from "./solo.js";
 import { renderSoloResults } from "./solo-view.js";
+import { ensureShareMount } from "./share.js";
 import { renderStats } from "./stats-view.js";
 import { BOT_PRESETS, BOT_WPM_MAX, BOT_WPM_MIN, clampBotWpm } from "./bot.js";
 import {
@@ -923,6 +924,35 @@ function resultsCopy() {
   return { title: "Finish order", detail: "" };
 }
 
+function shareView() {
+  if (state.shell === "solo-results") {
+    if (state.daily) return null;
+    const run = state.soloRun || {};
+    const format = run.format === "timed" || run.format === "punctuation" ? run.format : "passage";
+    return {
+      enabled: Boolean(state.config?.share),
+      ready: Number(run.ms) > 0,
+      kind: "practice",
+      ladder: state.mode,
+      format,
+      length: format === "timed" ? "" : (state.length || ""),
+      wpm: run.wpm,
+      accuracy: run.accuracy,
+      ms: Math.round(Number(run.ms) || 0),
+      name: state.session === "in" ? (state.me?.name || "") : "",
+    };
+  }
+  if (state.shell !== "results") return null;
+  const me = (state.results?.rows || []).find((row) => row.id === state.me?.id);
+  return {
+    enabled: Boolean(state.config?.share),
+    ready: Boolean(state.raceId) && !state.results?.cancelled && me?.ms != null,
+    kind: "race",
+    raceId: state.raceId || "",
+    name: state.me?.name || "",
+  };
+}
+
 function resultsView() {
   const box = h("div", { class: "results" });
   const copy = resultsCopy();
@@ -1168,6 +1198,9 @@ function paintDynamic() {
   if (state.shell === "room") paintRoom();
   if (state.shell === "browse") paintRooms();
   if (state.shell === "results") paintRematch();
+  if (state.shell === "results" || state.shell === "solo-results") {
+    ensureShareMount(document.querySelector("#stage .results"), h, shareView());
+  }
   if (state.shell === "race") {
     paintPassage();
     paintStats();

@@ -16,5 +16,8 @@
   "devDependencies": {
     "esbuild": "^0.28.2",
     "wrangler": "^4.42.0"
+  },
+  "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2"
   }
 }

@@ -7,6 +7,7 @@ import { json } from "./http.js";
 import { Lobby } from "./lobby.js";
 import { websocketOriginAllowed } from "./origin.js";
 import { Race } from "./race.js";
+import { shareGet, shareIssue } from "./share.js";
 
 export { Lobby, Race };
 
@@ -38,6 +39,8 @@ export default {
       if (request.method === "GET" && path === "/api/daily") return dailyBoard(request, env);
       if (request.method === "POST" && path === "/api/daily/start") return dailyStart(request, env);
       if (request.method === "POST" && path === "/api/daily/submit") return dailySubmit(request, env);
+      if (request.method === "POST" && path === "/api/share") return shareIssue(request, env);
+      if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/s/")) return shareGet(request, env);
       if (request.method === "GET" && path === "/auth/login") return login(request, env);
       if (request.method === "GET" && path === "/auth/callback") return callback(request, env);
       if (request.method === "POST" && path === "/auth/logout") return logout(request, env);

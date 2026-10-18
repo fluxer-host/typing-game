@@ -68,6 +68,7 @@ export async function build() {
   await rm(staging, { recursive: true, force: true });
   await mkdir(join(staging, "a"), { recursive: true });
   await mkdir(join(staging, ".well-known"), { recursive: true });
+  await mkdir(join(staging, "fonts"), { recursive: true });
   await writeFile(join(staging, "a", jsName), jsBytes);
   await writeFile(join(staging, "a", cssName), cssBytes);
 
@@ -86,6 +87,9 @@ export async function build() {
 
   for (const name of COPIED) {
     await writeFile(join(staging, name), await readFile(join(sourceDir, name)));
+  }
+  for (const name of ["LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf", "OFL.txt"]) {
+    await writeFile(join(staging, "fonts", name), await readFile(join(sourceDir, "fonts", name)));
   }
   await writeFile(
     join(staging, ".well-known", "security.txt"),

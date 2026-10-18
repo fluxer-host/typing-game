@@ -91,6 +91,15 @@ npx wrangler secret put TOKEN_ENCRYPTION_KEY
 
 `FLUXER_CLIENT_ID` and `FLUXER_CLIENT_SECRET` come from the Fluxer application. `SESSION_SECRET` does not. Run `openssl rand -base64 32`, then paste that output when `wrangler secret put SESSION_SECRET` prompts. It signs the login cookie. Run the command again and paste the new output into `TOKEN_ENCRYPTION_KEY`. That key encrypts the refresh token. Use a different value from `SESSION_SECRET`. Set `TOKEN_ENCRYPTION_KEY` before or with the deploy that starts encrypting tokens. The Fluxer bot token is not used.
 
+Result cards are signed with `SHARE_SIGNING_SECRET`. The share link is a compact token, so the result is not written to a new table. Set the secret before sharing works. If it is missing, `POST /api/share` returns `share_unavailable` and the Share button stays hidden.
+
+```bash
+openssl rand -base64 32
+npx wrangler secret put SHARE_SIGNING_SECRET
+```
+
+Put the same value in `.dev.vars` for local `wrangler dev`. To rotate it, copy the current secret into `SHARE_SIGNING_SECRET_PREVIOUS`, then set a new `SHARE_SIGNING_SECRET`. Old links keep verifying. New links use the new secret. Tokens do not expire.
+
 `ALLOWED_ORIGINS` is optional. WebSocket upgrades already allow the host that received the request. Set this secret or var only to add more origins, as a comma-separated list such as `https://preview.example`. A missing `Origin` header is refused.
 
 The Worker cron `17 * * * *` deletes expired session rows in batches of 100, up to 10 batches per run. Finished race objects keep their storage for 2 minutes after the result is saved, then delete it. Rematch records expire after 3 minutes.

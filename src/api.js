@@ -6,6 +6,7 @@ import { lengthList } from "./lengths.js";
 import { MODE_LIST } from "./modes.js";
 import { avatarUrl, publicPlayer } from "./profile.js";
 import { standingLabel } from "./rating.js";
+import { shareEnabled } from "./share-token.js";
 
 export function config(env) {
   return json({
@@ -15,6 +16,7 @@ export function config(env) {
     lengths: lengthList(),
     media: env.MEDIA_BASE || "https://fluxerusercontent.com",
     staticCdn: env.STATIC_CDN || "https://fluxerstatic.com",
+    share: shareEnabled(env),
   }, { cache: "private, max-age=60" });
 }
 
