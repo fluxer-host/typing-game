@@ -18,5 +18,7 @@ test("phone cursor keys stay at least 32px and lobby controls at least 44px", ()
   assert.match(css, /\.panel-recent \{ min-height: 140px; \}/);
   assert.match(css, /@media \(max-width: 540px\)[\s\S]*\.stats-table,\s*\.stats-table tbody/);
   assert.match(html, /class="btn ghost nav-stats" href="#\/stats"/);
+  assert.match(css, /\.ladder-tab\[aria-selected="true"\] \{[^}]*background:\s*var\(--flux\)/);
+  assert.match(css, /\.ladder-tab\[aria-selected="true"\] \{[^}]*color:\s*var\(--on-flux\)/);
   assert.equal(html.includes("style="), false);
 });
