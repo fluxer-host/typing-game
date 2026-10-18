@@ -72,7 +72,8 @@ button { cursor: pointer; }
 
 .top-nav { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.nav-stats[aria-current="page"] { border-color: var(--flux-edge); }
+.nav-stats[aria-current="page"],
+.nav-ladder[aria-current="page"] { border-color: var(--flux-edge); }
 
 .account {
   display: flex;
@@ -687,6 +688,114 @@ button:focus-visible, a:focus-visible, input:focus-visible,
     min-width: 0;
     max-width: none;
   }
+}
+
+.ladder-page { min-width: 0; max-width: 100%; }
+
+.ladder-tabs,
+.ladder-filters,
+.ladder-days,
+.ladder-pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.ladder-tab { flex: 1 1 7rem; }
+
+.ladder-panel { min-width: 0; max-width: 100%; }
+
+.ladder-day,
+.ladder-page-label,
+.ladder-you { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+.ladder-page-label { flex: 1 1 12rem; }
+
+.ladder-table {
+  width: 100%;
+  max-width: 100%;
+  margin-top: 12px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.ladder-caption {
+  margin: 0 0 6px;
+  text-align: left;
+  font-weight: 650;
+  color: var(--text);
+  caption-side: top;
+}
+
+.ladder-caption:focus,
+.ladder-sub:focus {
+  outline: 2px solid var(--flux-2);
+  outline-offset: 2px;
+}
+
+.ladder-table .col-rank { width: 3rem; }
+
+.ladder-table .col-score { width: 4.6rem; }
+
+.ladder-table .col-secondary { width: 4.8rem; }
+
+.ladder-table .col-extra { width: 5.2rem; }
+
+.ladder-table th,
+.ladder-table td { overflow-wrap: anywhere; }
+
+.ladder-table tbody tr { height: 44px; }
+
+.ladder-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ladder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.you-tag {
+  flex: none;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 6px;
+}
+
+.ladder-skel {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg-3);
+}
+
+.ladder-sub {
+  margin: 18px 0 8px;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--text);
+}
+
+.ladder-filters [aria-pressed="true"] { border-color: var(--flux-edge); }
+
+@media (max-width: 540px) {
+  .ladder-table .col-secondary,
+  .ladder-table .col-extra { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

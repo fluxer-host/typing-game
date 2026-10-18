@@ -14,9 +14,18 @@ function whole(value) {
   return parsed;
 }
 
+export const LADDER_PAGE_SIZE = BOARD_DEFAULT_LIMIT;
+export const LADDER_RANK_RADIUS = 2;
+
 export function parseBoardQuery(params) {
   const mode = params.get("mode");
   if (!isMode(mode)) return { ok: false, error: "mode" };
+  // Rating is one number per ladder. A length or a week would look like a
+  // filter and still return the combined board, so those values are rejected.
+  const length = params.get("length");
+  if (length != null && length !== "") return { ok: false, error: "length" };
+  const period = params.get("period");
+  if (period != null && period !== "" && period !== "all") return { ok: false, error: "period" };
   const limitRaw = params.get("limit");
   const offsetRaw = params.get("offset");
   const limit = limitRaw == null || limitRaw === "" ? BOARD_DEFAULT_LIMIT : whole(limitRaw);
@@ -24,6 +33,51 @@ export function parseBoardQuery(params) {
   if (limit == null || limit < 1 || limit > BOARD_MAX_LIMIT) return { ok: false, error: "limit" };
   if (offset == null || offset < 0 || offset > BOARD_MAX_OFFSET) return { ok: false, error: "offset" };
   return { ok: true, mode, limit, offset };
+}
+
+export function pageWindow(total, page, pageSize = LADDER_PAGE_SIZE) {
+  const size = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : LADDER_PAGE_SIZE;
+  const count = Number.isFinite(Number(total)) && Number(total) > 0 ? Math.floor(Number(total)) : 0;
+  const pages = count === 0 ? 1 : Math.ceil(count / size);
+  let current = Number.isInteger(page) && page > 0 ? page : 1;
+  if (current > pages) current = pages;
+  const offset = (current - 1) * size;
+  const start = count === 0 ? 0 : offset + 1;
+  const end = count === 0 ? 0 : Math.min(offset + size, count);
+  return {
+    page: current,
+    pages,
+    offset,
+    start,
+    end,
+    total: count,
+    hasPrev: current > 1,
+    hasNext: current < pages,
+  };
+}
+
+export function pageLabel(window) {
+  if (!window || window.total === 0) return "Page 1 of 1.";
+  return `Page ${window.page} of ${window.pages}, showing ${window.start} to ${window.end} of ${window.total}.`;
+}
+
+export function rankWindow(rank, total, radius = LADDER_RANK_RADIUS) {
+  const place = Number(rank);
+  const count = Number(total);
+  if (!Number.isInteger(place) || place < 1) return null;
+  if (!Number.isFinite(count) || place > count) return null;
+  const span = Number.isInteger(radius) && radius >= 0 ? radius : LADDER_RANK_RADIUS;
+  const from = Math.max(1, place - span);
+  const to = Math.min(Math.floor(count), place + span);
+  return { from, to, offset: from - 1, limit: to - from + 1 };
+}
+
+export function winRate(wins, races) {
+  const played = Number(races);
+  const won = Number(wins);
+  if (!Number.isFinite(played) || played <= 0) return null;
+  if (!Number.isFinite(won) || won <= 0) return 0;
+  return Math.min(1, won / played);
 }
 
 function finite(value, fallback) {
@@ -80,5 +134,24 @@ export function boardEntry(user, mode, rank) {
     rating: stats.elo,
     races: stats.races,
     wins: stats.wins,
+  };
+}
+
+// Public ladder row. `avatarUrl` is already resolved. A custom avatar URL
+// contains the account id, so that URL is dropped before the response.
+export function shapeLadderRow(user, mode, rank) {
+  const entry = boardEntry(user, mode, rank);
+  const id = user?.id == null ? "" : String(user.id);
+  let avatar = typeof user?.avatarUrl === "string" && user.avatarUrl ? user.avatarUrl : null;
+  if (avatar && id && avatar.includes(id)) avatar = null;
+  const color = Number(user?.avatar_color ?? user?.color);
+  return {
+    rank: entry.rank,
+    name: entry.name,
+    avatar,
+    color: Number.isFinite(color) ? color : null,
+    rating: entry.rating,
+    races: entry.races,
+    wins: entry.wins,
   };
 }

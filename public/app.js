@@ -56,6 +56,22 @@ import {
 } from "./daily.js";
 import { appendDaily, fillDaily, renderDailyResults } from "./daily-view.js";
 import {
+  LADDER_PAGE_SIZE,
+  dailyPagePath,
+  focusAfterPaint,
+  freshLadder,
+  ladderAnnounce,
+  ladderHash,
+  ladderKey,
+  ladderViewModel,
+  pageWindow,
+  parseLadderHash,
+  ratingPagePath,
+  routeFromHash,
+  shiftUtcDay,
+} from "./ladder.js";
+import { renderLadder } from "./ladder-view.js";
+import {
   LOBBY_RETRY_BASE_MS,
   LOBBY_RETRY_CAP_MS,
   LOBBY_RETRY_LIMIT,
@@ -120,6 +136,13 @@ const AUTH_ERRORS = {
   profile: "Fluxer did not return a profile.",
 };
 
+function initialRoute() {
+  if (typeof location === "undefined") return { route: "", ladder: null };
+  return routeFromHash(location.hash);
+}
+
+const initial = initialRoute();
+
 const state = {
   config: null,
   me: null,
@@ -173,7 +196,9 @@ const state = {
   dailyLocal: loadDailyLocal(browserStorage()),
   dailyError: "",
   dailyPullDay: "",
-  route: typeof location !== "undefined" && location.hash === "#/stats" ? "stats" : "",
+  route: initial.route,
+  ladder: freshLadder(initial.ladder),
+  ladderFocusId: "",
   clearConfirm: false,
 };
 
@@ -195,6 +220,8 @@ let refocusTries = 0;
 let inputGuardEpoch = 0;
 let composeEpoch = 0;
 let lastLive = "";
+let ladderEpoch = 0;
+let ladderPaintToken = "";
 let lastNote = "";
 let heardLock = false;
 const heardFinish = new Set();
@@ -242,7 +269,9 @@ function toast(text) {
 function setPageTitle() {
   const settled = state.session === "in" || state.session === "out";
   const racing = state.phase === "countdown" || state.phase === "race" || state.phase === "finishing" || state.phase === "results";
-  const phase = settled && !racing && state.route === "stats" ? "stats" : state.phase;
+  let phase = state.phase;
+  if (settled && !racing && state.route === "stats") phase = "stats";
+  else if (settled && !racing && state.route === "ladder") phase = "ladder";
   const next = phase === state.phase ? pageTitle(state.phase) : pageTitle(phase);
   if (document.title !== next) document.title = next;
 }
@@ -274,7 +303,7 @@ function shellName() {
     phase: state.phase,
     lobbyOpen: state.lobbyStatus === "open",
     solo: Boolean(state.localPractice),
-    view: state.route === "stats" ? "stats" : "",
+    view: state.route === "stats" ? "stats" : state.route === "ladder" ? "ladder" : "",
   });
 }
 
@@ -384,6 +413,7 @@ function paintShell() {
     view.querySelector("[data-action='race-again']")?.focus();
   }
   else if (state.shell === "stats") stage.append(h("div", { id: "stats-root", class: "stats-page" }));
+  else if (state.shell === "ladder") stage.append(h("div", { id: "ladder-root", class: "ladder-page" }));
 }
 
 function bootErrorView() {
@@ -1046,6 +1076,7 @@ function paintDynamic() {
     paintDaily();
   }
   if (state.shell === "stats") paintStatsPage();
+  if (state.shell === "ladder") paintLadder();
   if (state.shell === "queue") {
     const copy = document.getElementById("queue-copy");
     if (copy) copy.textContent = queueCopy();
@@ -2149,7 +2180,7 @@ function exitToLobby() {
   state.queue = null;
   state.rematch = null;
   state.forfeitConfirm = false;
-  if (location.hash !== "#/stats") {
+  if (location.hash !== "#/stats" && !location.hash.startsWith("#/ladder")) {
     state.route = "";
     state.clearConfirm = false;
   }
@@ -3192,10 +3223,170 @@ function downloadHistory(text) {
 }
 
 function paintNav() {
-  const link = document.querySelector(".nav-stats");
-  if (!link) return;
-  if (state.shell === "stats") link.setAttribute("aria-current", "page");
-  else link.removeAttribute("aria-current");
+  const stats = document.querySelector(".nav-stats");
+  const ladder = document.querySelector(".nav-ladder");
+  if (stats) {
+    if (state.shell === "stats") stats.setAttribute("aria-current", "page");
+    else stats.removeAttribute("aria-current");
+  }
+  if (ladder) {
+    if (state.shell === "ladder") ladder.setAttribute("aria-current", "page");
+    else ladder.removeAttribute("aria-current");
+  }
+}
+
+function ladderPaintKey() {
+  const data = state.ladder.data;
+  const rows = data?.rows || [];
+  return [
+    state.ladder.status,
+    ladderKey(state.ladder),
+    state.ladder.error,
+    data?.total ?? "",
+    data?.day ?? "",
+    rows.length,
+    rows[0]?.rank ?? "",
+    rows.at(-1)?.rank ?? "",
+    data?.you?.rank ?? "",
+    (data?.around || []).length,
+  ].join("|");
+}
+
+function paintLadder() {
+  const root = document.getElementById("ladder-root");
+  if (!root) return;
+  const model = ladderViewModel(state.ladder);
+  const token = ladderPaintKey();
+  if (token !== ladderPaintToken || !root.childElementCount) {
+    ladderPaintToken = token;
+    root.replaceChildren();
+    renderLadder(root, h, model, {
+      onTab: (id) => goLadder({ tab: id }, { focusId: `ladder-tab-${id}` }),
+      onPage: (delta) => goLadder({ page: state.ladder.page + delta }, { focusId: "ladder-caption" }),
+      onDay: (delta) => {
+        const shown = state.ladder.data?.day || state.ladder.day;
+        const next = shiftUtcDay(shown, delta);
+        if (next) goLadder({ day: next }, { focusId: "ladder-caption" });
+      },
+      onDailyLadder: (id) => goLadder({ ladder: id }, { focusId: "ladder-caption" }),
+      onJump: jumpToRank,
+      onRetry: () => pullLadder(),
+      onToday: () => goLadder({ day: "" }, { focusId: "ladder-caption" }),
+      onPlay: leaveLadder,
+    });
+  }
+  const focusId = state.ladderFocusId;
+  if (focusId) {
+    const node = document.getElementById(focusId);
+    const action = focusAfterPaint(state.ladder.status, node?.getAttribute("role") || "");
+    if (node && action !== "later") node.focus();
+    if (action === "now-clear") state.ladderFocusId = "";
+  }
+}
+
+function leaveLadder() {
+  history.pushState({}, "", `${location.pathname}${location.search}`);
+  state.route = "";
+  state.ladderFocusId = "";
+  ensure();
+}
+
+function jumpToRank() {
+  const rank = Number(state.ladder.data?.you?.rank);
+  if (!Number.isInteger(rank) || rank < 1) return;
+  const page = Math.floor((rank - 1) / LADDER_PAGE_SIZE) + 1;
+  const focusId = `ladder-row-${rank}`;
+  if (page === state.ladder.page) {
+    state.ladderFocusId = focusId;
+    ensure();
+    return;
+  }
+  goLadder({ page }, { focusId });
+}
+
+function goLadder(patch, { replace = false, focusId = "" } = {}) {
+  const current = state.ladder;
+  const next = {
+    tab: patch.tab ?? current.tab,
+    page: patch.page ?? current.page,
+    ladder: patch.ladder ?? current.ladder,
+    day: patch.day !== undefined ? patch.day : current.day,
+  };
+  if (patch.tab && patch.tab !== current.tab && patch.page == null) next.page = 1;
+  if (patch.ladder && patch.ladder !== current.ladder && patch.page == null) next.page = 1;
+  if (patch.day !== undefined && patch.day !== current.day && patch.page == null) next.page = 1;
+  const hash = ladderHash(next);
+  state.ladderFocusId = focusId;
+  const nextUrl = `${location.pathname}${location.search}${hash}`;
+  if (replace) {
+    history.replaceState({}, "", nextUrl);
+    state.route = "ladder";
+    state.ladder = { ...state.ladder, ...next };
+    pullLadder();
+    return;
+  }
+  if (location.hash === hash) {
+    ensure();
+    return;
+  }
+  location.hash = hash;
+}
+
+async function pullLadder() {
+  const epoch = ++ladderEpoch;
+  const query = {
+    tab: state.ladder.tab,
+    page: state.ladder.page,
+    ladder: state.ladder.ladder,
+    day: state.ladder.day,
+  };
+  state.ladder.status = "loading";
+  state.ladder.error = "";
+  ensure();
+  announce("Loading the ladder.");
+  const path = query.tab === "daily"
+    ? dailyPagePath({ ladder: query.ladder, day: query.day, page: query.page })
+    : ratingPagePath({ mode: query.tab, page: query.page });
+  const result = await pull(path, { cache: "no-store" });
+  if (epoch !== ladderEpoch) return;
+  if (ladderKey(state.ladder) !== ladderKey(query)) return;
+  if (!result.ok) {
+    state.ladder.status = "error";
+    state.ladder.error = result.status === 400
+      ? "That ladder page is not available."
+      : "The ladder did not load.";
+    state.ladder.data = null;
+    ensure();
+    announce(ladderAnnounce(state.ladder));
+    return;
+  }
+  const total = Number(result.data?.total) || 0;
+  const fitted = pageWindow(total, query.page).page;
+  if (fitted !== query.page) {
+    goLadder({ page: fitted }, { replace: true, focusId: state.ladderFocusId || "ladder-caption" });
+    return;
+  }
+  state.ladder.data = result.data;
+  state.ladder.status = total === 0 ? "empty" : "ready";
+  ensure();
+  announce(ladderAnnounce(state.ladder));
+}
+
+function syncLadderHash() {
+  const parsed = parseLadderHash(location.hash);
+  if (!parsed?.invalid) return false;
+  const clean = ladderHash(parsed);
+  history.replaceState({}, "", `${location.pathname}${location.search}${clean}`);
+  const again = parseLadderHash(location.hash);
+  state.route = "ladder";
+  state.ladder = {
+    ...state.ladder,
+    tab: again.tab,
+    page: again.page,
+    ladder: again.ladder,
+    day: again.day,
+  };
+  return true;
 }
 
 async function boot() {
@@ -3210,6 +3401,10 @@ async function boot() {
   ensureNetBanner();
   try {
     await Promise.allSettled([pullMe(), pullConfig(), pullBoard(), pullDaily()]);
+    if (state.route === "ladder") {
+      syncLadderHash();
+      await pullLadder();
+    }
     ensure();
     if (state.session === "in" && params.get("room") && !sessionStorage.getItem("tg_race")) {
       sendLobby({ t: "room_join", code: params.get("room") });
@@ -3223,16 +3418,37 @@ async function boot() {
 }
 
 window.addEventListener("hashchange", () => {
-  const next = location.hash === "#/stats" ? "stats" : "";
+  const parsed = routeFromHash(location.hash);
+  const next = parsed.route;
   const racing = state.phase === "countdown" || state.phase === "race" || state.phase === "finishing";
   const holding = state.phase === "queue" || state.phase === "room" || state.phase === "browse";
-  if ((racing || holding) && next === "stats") {
+  if ((racing || holding) && (next === "stats" || next === "ladder")) {
     history.replaceState({}, "", `${location.pathname}${location.search}`);
     return;
   }
+  const previousRoute = state.route;
+  const previous = ladderKey(state.ladder);
   state.route = next;
+  if (next === "ladder") {
+    syncLadderHash();
+    const current = parseLadderHash(location.hash);
+    state.ladder = {
+      ...state.ladder,
+      tab: current.tab,
+      page: current.page,
+      ladder: current.ladder,
+      day: current.day,
+    };
+  }
   if (state.route !== "stats") state.clearConfirm = false;
-  ensure();
+  const ladderChanged = state.route === "ladder" && (previousRoute !== "ladder" || ladderKey(state.ladder) !== previous);
+  if (ladderChanged) {
+    if (!state.ladderFocusId) {
+      const tabChanged = previous.split("|")[0] !== state.ladder.tab;
+      state.ladderFocusId = tabChanged ? `ladder-tab-${state.ladder.tab}` : "ladder-caption";
+    }
+    pullLadder();
+  } else ensure();
 });
 
 boot();

@@ -1,5 +1,6 @@
 // D1 rows for the daily challenge. Scoring uses src/daily.js.
 
+import { rankWindow } from "./board.js";
 import { avatarUrl, displayName } from "./profile.js";
 import {
   parseUtcDay,
@@ -256,24 +257,22 @@ function boardUser(row) {
   };
 }
 
-export async function loadDailyBoard(env, { ladder, day, limit, user, now }) {
-  const passage = dailyPassage(ladder, day);
-  const listed = await env.DB.prepare(
-    `SELECT id, username, global_name, avatar, avatar_color, wpm, accuracy, rank
-     FROM (
-       SELECT u.id, u.username, u.global_name, u.avatar, u.avatar_color,
-              r.wpm, r.accuracy,
-              ROW_NUMBER() OVER (
-                ORDER BY r.wpm DESC, r.accuracy DESC, r.duration_ms ASC, r.created_at ASC
-              ) AS rank
-       FROM daily_results r
-       JOIN users u ON u.id = r.user_id
-       WHERE r.ladder = ? AND r.day = ?
-     ) AS ranked
-     WHERE rank <= ?
-     ORDER BY rank ASC`,
-  ).bind(ladder, day, limit).all();
-  const rows = (listed.results || []).map((row) => shapeDailyRow({
+const DAILY_PAGE_SQL = `SELECT id, username, global_name, avatar, avatar_color, wpm, accuracy, rank
+ FROM (
+   SELECT u.id, u.username, u.global_name, u.avatar, u.avatar_color,
+          r.wpm, r.accuracy,
+          ROW_NUMBER() OVER (
+            ORDER BY r.wpm DESC, r.accuracy DESC, r.duration_ms ASC, r.created_at ASC
+          ) AS rank
+   FROM daily_results r
+   JOIN users u ON u.id = r.user_id
+   WHERE r.ladder = ? AND r.day = ?
+ ) AS ranked
+ WHERE rank > ? AND rank <= ?
+ ORDER BY rank ASC`;
+
+function presentDaily(env, row, user) {
+  return shapeDailyRow({
     id: row.id,
     name: displayName(boardUser(row)),
     avatar: avatarUrl(boardUser(row), env),
@@ -282,7 +281,23 @@ export async function loadDailyBoard(env, { ladder, day, limit, user, now }) {
     accuracy: row.accuracy,
     rank: Number(row.rank),
     self: Boolean(user && row.id === user.id),
-  }));
+  });
+}
+
+async function dailyPage(env, ladder, day, offset, limit) {
+  const listed = await env.DB.prepare(DAILY_PAGE_SQL).bind(ladder, day, offset, offset + limit).all();
+  return listed.results || [];
+}
+
+export async function loadDailyBoard(env, { ladder, day, limit, offset = 0, user, now }) {
+  const passage = dailyPassage(ladder, day);
+  const counted = await env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM daily_results WHERE ladder = ? AND day = ?",
+  ).bind(ladder, day).first();
+  const total = Number(counted?.total || 0);
+  const start = Number(offset) > 0 ? Number(offset) : 0;
+  const listed = await dailyPage(env, ladder, day, start, limit);
+  const rows = listed.map((row) => presentDaily(env, row, user));
   let you = null;
   if (user) {
     const mine = await getDailyResult(env, user.id, ladder, day);
@@ -291,7 +306,7 @@ export async function loadDailyBoard(env, { ladder, day, limit, user, now }) {
       you = publicScore(user, mine, rank, env);
     }
   }
-  return {
+  const body = {
     ladder,
     day,
     serverNow: now,
@@ -301,9 +316,18 @@ export async function loadDailyBoard(env, { ladder, day, limit, user, now }) {
     passageId: passage?.id || "",
     passage: passage?.text || "",
     limit,
+    offset: start,
+    total,
+    hasMore: start + rows.length < total,
     rows,
     you,
   };
+  const window = you?.rank ? rankWindow(you.rank, total) : null;
+  if (window) {
+    const around = await dailyPage(env, ladder, day, window.offset, window.limit);
+    body.around = around.map((row) => presentDaily(env, row, user));
+  }
+  return body;
 }
 
 async function deleteBatch(env, sql, cutoff) {

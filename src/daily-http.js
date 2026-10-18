@@ -37,6 +37,7 @@ export async function dailyBoard(request, env, now = Date.now()) {
     ladder: parsed.ladder,
     day: parsed.day,
     limit: parsed.limit,
+    offset: parsed.offset,
     user: resolved?.user || null,
     now,
   });

@@ -34,7 +34,7 @@ export function sessionShell({ session, phase, lobbyOpen, solo = false, view = "
   const racing = phase === "countdown" || phase === "race" || phase === "finishing";
   const holding = phase === "queue" || phase === "room" || phase === "browse";
   if (solo && racing) return "race";
-  if (view === "stats" && !racing && !holding) return "stats";
+  if ((view === "stats" || view === "ladder") && !racing && !holding) return view;
   if (solo && phase === "results") return "solo-results";
   if (session !== "in") return "auth";
   if (phase === "results") return "results";

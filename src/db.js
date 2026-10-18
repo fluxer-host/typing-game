@@ -101,7 +101,7 @@ export async function deleteSession(env, id) {
 export async function leaderboard(env, mode, limit = 25, offset = 0) {
   const cols = columns(mode);
   const result = await env.DB.prepare(
-    `SELECT id, username, global_name, ${cols.elo}, ${cols.races}, ${cols.wins}, ${cols.best}
+    `SELECT id, username, global_name, avatar, avatar_color, ${cols.elo}, ${cols.races}, ${cols.wins}, ${cols.best}
      FROM users
      WHERE ${cols.races} > 0
      ORDER BY ${cols.elo} DESC, ${cols.best} DESC, id ASC
@@ -110,6 +110,14 @@ export async function leaderboard(env, mode, limit = 25, offset = 0) {
     .bind(limit, offset)
     .all();
   return result.results || [];
+}
+
+export async function leaderboardCount(env, mode) {
+  const cols = columns(mode);
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS total FROM users WHERE ${cols.races} > 0`,
+  ).first();
+  return Number(row?.total || 0);
 }
 
 // Position in the same order as leaderboard(). Null when this ladder has no races.

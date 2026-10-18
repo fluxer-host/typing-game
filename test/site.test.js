@@ -95,7 +95,7 @@ test("the manifest, robots file, and sitemap describe the public site", () => {
   assert.equal(sitemap.includes("/api/"), false);
 
   const security = readDist(".well-known/security.txt");
-  assert.match(security, /^Contact: mailto:security@example.com$/m);
+  assert.match(security, /^Contact: mailto:security@fluxer.host$/m);
   assert.match(security, /Replace Contact/);
   assert.match(security, /^Expires: 2027-10-17T00:00:00\.000Z$/m);
 });

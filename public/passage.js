@@ -50,5 +50,6 @@ export function pageTitle(phase) {
   if (phase === "race" || phase === "finishing") return "Typing race, racing";
   if (phase === "results") return "Typing race, results";
   if (phase === "stats") return "Typing race, stats";
+  if (phase === "ladder") return "Typing race, ladder";
   return "Typing race";
 }

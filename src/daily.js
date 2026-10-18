@@ -13,6 +13,7 @@ export const DAILY_RESULT_RETENTION_DAYS = 90;
 export const DAILY_ATTEMPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DAILY_BOARD_DEFAULT_LIMIT = 25;
 export const DAILY_BOARD_MAX_LIMIT = 100;
+export const DAILY_BOARD_MAX_OFFSET = 10_000;
 export const DAILY_CARD_LIMIT = 10;
 export const DAILY_CACHE_SECONDS = 30;
 export const DAILY_MAX_STEPS = 800;
@@ -102,7 +103,10 @@ export function parseDailyQuery(params, nowMs) {
   const limitRaw = params.get("limit");
   const limit = limitRaw == null || limitRaw === "" ? DAILY_BOARD_DEFAULT_LIMIT : whole(limitRaw);
   if (limit == null || limit < 1 || limit > DAILY_BOARD_MAX_LIMIT) return { ok: false, error: "limit" };
-  return { ok: true, ladder, day: allowed.day, limit };
+  const offsetRaw = params.get("offset");
+  const offset = offsetRaw == null || offsetRaw === "" ? 0 : whole(offsetRaw);
+  if (offset == null || offset < 0 || offset > DAILY_BOARD_MAX_OFFSET) return { ok: false, error: "offset" };
+  return { ok: true, ladder, day: allowed.day, limit, offset };
 }
 
 export function dailySeed(dayNumber, ladder) {

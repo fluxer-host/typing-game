@@ -1,10 +1,10 @@
-import { BOARD_CACHE_SECONDS, boardEntry, parseBoardQuery } from "./board.js";
-import { leaderboard, leaderboardRank, recentRaces } from "./db.js";
+import { BOARD_CACHE_SECONDS, parseBoardQuery, rankWindow, shapeLadderRow } from "./board.js";
+import { leaderboard, leaderboardCount, leaderboardRank, recentRaces } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { lengthList } from "./lengths.js";
 import { MODE_LIST } from "./modes.js";
-import { publicPlayer } from "./profile.js";
+import { avatarUrl, publicPlayer } from "./profile.js";
 import { standingLabel } from "./rating.js";
 
 export function config(env) {
@@ -34,19 +34,35 @@ export async function me(request, env) {
   return json({ user: publicPlayer(resolved.user, env) });
 }
 
+function ladderRow(env, row, mode, rank, caller) {
+  const shaped = shapeLadderRow({ ...row, avatarUrl: avatarUrl(row, env) }, mode, rank);
+  if (caller && row?.id != null && String(row.id) === String(caller.id)) shaped.self = true;
+  return shaped;
+}
+
 export async function board(request, env) {
   const parsed = parseBoardQuery(new URL(request.url).searchParams);
   if (!parsed.ok) return json({ error: parsed.error }, { status: 400 });
   const resolved = await resolveUser(request, env);
+  const caller = resolved?.user || null;
   const rows = await leaderboard(env, parsed.mode, parsed.limit, parsed.offset);
+  const total = await leaderboardCount(env, parsed.mode);
   const body = {
     mode: parsed.mode,
     limit: parsed.limit,
     offset: parsed.offset,
-    rows: rows.map((row, index) => boardEntry(row, parsed.mode, parsed.offset + index + 1)),
+    total,
+    hasMore: parsed.offset + rows.length < total,
+    rows: rows.map((row, index) => ladderRow(env, row, parsed.mode, parsed.offset + index + 1, caller)),
   };
-  if (resolved?.user) {
-    body.you = boardEntry(resolved.user, parsed.mode, await leaderboardRank(env, parsed.mode, resolved.user));
+  if (caller) {
+    const rank = await leaderboardRank(env, parsed.mode, caller);
+    body.you = ladderRow(env, caller, parsed.mode, rank, caller);
+    const window = rankWindow(rank, total);
+    if (window) {
+      const around = await leaderboard(env, parsed.mode, window.limit, window.offset);
+      body.around = around.map((row, index) => ladderRow(env, row, parsed.mode, window.offset + index + 1, caller));
+    }
   }
   const cache = resolved
     ? `private, max-age=${BOARD_CACHE_SECONDS}`
