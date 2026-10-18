@@ -8,6 +8,7 @@ import {
   formatRunDate,
   historyExport,
   ladderName,
+  lengthLabel,
   lengthName,
 } from "./history.js";
 import { passageById } from "../src/sentences.js";
@@ -35,6 +36,17 @@ function bestRows(h, model) {
       body.append(row);
     }
   }
+  const known = new Set(model.ladders.flatMap((mode) => model.lengths.map((length) => `${mode}|${length}`)));
+  const extras = Object.entries(model.bests).filter(([key]) => !known.has(key));
+  extras.sort(([a], [b]) => a.localeCompare(b));
+  for (const [, best] of extras) {
+    const row = h("tr", {});
+    row.append(cell(h, "Ladder", ladderName(best.mode)));
+    row.append(cell(h, "Length", lengthLabel(best)));
+    row.append(cell(h, "Best WPM", Number(best.wpm).toFixed(1)));
+    row.append(cell(h, "Accuracy", `${Number(best.accuracy)}%`));
+    body.append(row);
+  }
   return body;
 }
 
@@ -51,7 +63,7 @@ function recentRows(h, model) {
     const row = h("tr", {});
     row.append(cell(h, "Date", formatRunDate(run.at)));
     row.append(cell(h, "Ladder", ladderName(run.mode) || run.mode || ""));
-    row.append(cell(h, "Length", lengthName(run.length)));
+    row.append(cell(h, "Length", lengthLabel(run)));
     const standing = displayStanding(run);
     row.append(cell(h, "Kind", standing === "Practice" ? practiceTitle(run) : standing));
     row.append(cell(h, "WPM", Number(run.wpm).toFixed(1)));

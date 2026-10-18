@@ -1,5 +1,7 @@
 // Local practice history. Ranked rows from the server are merged only for display.
 
+import { bestKey } from "./race-format.js";
+
 export const HISTORY_KEY = "tg_history_v1";
 export const HISTORY_VERSION = 1;
 export const HISTORY_LIMIT = 200;
@@ -29,7 +31,7 @@ export function normalizeRun(raw) {
   if (!Number.isFinite(wpm) || !Number.isFinite(accuracy) || !Number.isFinite(ms) || ms <= 0) return null;
   if (!Number.isFinite(at)) return null;
   const errors = Number(raw.errors);
-  return {
+  const row = {
     at,
     mode: raw.mode,
     length: raw.length,
@@ -42,6 +44,16 @@ export function normalizeRun(raw) {
     opponent: raw.opponent === "bot" || raw.opponent === "ghost" ? raw.opponent : "",
     source: "local",
   };
+  if (raw.format === "timed") {
+    const durationMs = Number(raw.durationMs);
+    if (durationMs === 30000 || durationMs === 60000 || durationMs === 120000) {
+      row.format = "timed";
+      row.durationMs = durationMs;
+    }
+  } else if (raw.format === "punctuation") {
+    row.format = "punctuation";
+  }
+  return row;
 }
 
 export function capHistory(runs, limit = HISTORY_LIMIT) {
@@ -99,14 +111,29 @@ function finiteRuns(runs) {
   return (Array.isArray(runs) ? runs : []).filter((run) => run && Number.isFinite(Number(run.wpm)));
 }
 
+export function lengthLabel(run) {
+  if (run?.format === "timed") {
+    const seconds = Math.round((Number(run.durationMs) || 0) / 1000);
+    return seconds > 0 ? `Timed ${seconds}s` : "Timed";
+  }
+  if (run?.format === "punctuation") {
+    const name = lengthName(run?.length);
+    return name ? `Punctuation · ${name}` : "Punctuation";
+  }
+  return lengthName(run?.length);
+}
+
 export function personalBests(runs) {
   const best = {};
   for (const run of Array.isArray(runs) ? runs : []) {
-    if (!LADDER_NAMES[run?.mode] || !LENGTH_NAMES[run?.length]) continue;
+    if (!LADDER_NAMES[run?.mode]) continue;
+    const format = run?.format === "timed" || run?.format === "punctuation" ? run.format : "passage";
+    if (format !== "timed" && !LENGTH_NAMES[run?.length]) continue;
     const wpm = Number(run.wpm);
     if (!Number.isFinite(wpm)) continue;
     const accuracy = Number(run.accuracy);
-    const key = `${run.mode}|${run.length}`;
+    const key = bestKey(run);
+    if (!key) continue;
     const prev = best[key];
     const prevAccuracy = Number(prev?.accuracy);
     if (!prev || wpm > Number(prev.wpm) || (wpm === Number(prev.wpm) && accuracy > prevAccuracy)) best[key] = run;
@@ -144,6 +171,7 @@ export function bestByPassage(runs, passageIdForText) {
 
 export function displayStanding(run) {
   if (!run || typeof run !== "object") return "";
+  if (run.format === "timed" || run.format === "punctuation") return "Unranked";
   if (run.ranked === true || run.label === "rated") return "Ranked";
   if (run.label === "Unranked") return "Unranked";
   return "Practice";
@@ -169,7 +197,7 @@ export function recentLabel(run) {
     else if (run?.place != null) parts.push(`#${run.place}`);
   }
   parts.push(ladderName(run?.mode) || "Desktop");
-  const length = lengthName(run?.length);
+  const length = lengthLabel(run);
   if (length) parts.push(length);
   if (standing) parts.push(standing);
   return parts.join(" · ");

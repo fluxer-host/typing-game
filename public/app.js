@@ -13,11 +13,28 @@ import {
   officialResultNote,
   stepLiveTrack,
 } from "./live-stats.js";
+import { punctuationAllowed, readDurationMs, readFormat } from "../src/formats.js";
 import { lengthList } from "../src/lengths.js";
 import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
 import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
 import { raceKeyPlan } from "./keys.js";
 import { appendLadders } from "./ladder-picker.js";
+import {
+  applyChunk,
+  appendFormatChoices,
+  choiceFor,
+  CURSOR_PUNCTUATION_NOTE,
+  formatSummary,
+  loadFormatChoice,
+  presentTimedSteps,
+  raceMetaFor,
+  rememberRaceMeta,
+  remainingMs,
+  resultFormatLine,
+  saveFormatChoice,
+  timedHeadline,
+  timerModel,
+} from "./race-format.js";
 import {
   appendRun,
   buildStatsModel,
@@ -150,6 +167,20 @@ function initialRoute() {
 
 const initial = initialRoute();
 
+function openingFormat() {
+  const choice = loadFormatChoice();
+  let mode = "desktop";
+  try {
+    mode = localStorage.getItem("tg_mode") || "desktop";
+  } catch {
+    mode = "desktop";
+  }
+  if (choice.format === "punctuation" && !punctuationAllowed(mode)) return choiceFor("passage", 0);
+  return choice;
+}
+
+const opening = openingFormat();
+
 const state = {
   config: null,
   me: null,
@@ -158,6 +189,8 @@ const state = {
   boardYou: null,
   mode: localStorage.getItem("tg_mode") || "desktop",
   length: localStorage.getItem("tg_length") || "sprint",
+  format: opening.format,
+  durationMs: opening.format === "timed" ? opening.durationMs : 0,
   phase: "lobby",
   sentence: "",
   typed: "",
@@ -447,6 +480,7 @@ function authView() {
     onMode: chooseMode,
     onLength: chooseLength,
   });
+  appendFormatChoices(box, h, formatControls());
   appendDaily(box, h, { onPlay: () => beginDaily() });
   const actions = h("div", { class: "actions" });
   actions.append(h("button", {
@@ -454,7 +488,7 @@ function authView() {
     type: "button",
     "data-action": "practice",
     text: "Practice",
-    onclick: () => beginSolo(),
+    onclick: () => startPractice(),
   }));
   if (state.config?.oauth) {
     actions.append(h("a", { class: "btn", href: "/auth/login", text: "Sign in with Fluxer" }));
@@ -514,14 +548,14 @@ function lobbyView() {
       return `${Math.round(elo ?? 1000)} elo${best ? ` · best ${best} wpm` : ""}`;
     },
   });
+  appendFormatChoices(box, h, formatControls());
   appendDaily(box, h, { onPlay: () => beginDaily() });
   box.append(h("div", { id: "config-note", hidden: true }));
   const actions = h("div", { class: "actions" });
-  const play = () => ({ mode: state.mode, length: state.length });
   actions.append(
-    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => beginPlay("queue", { t: "queue", ...play() }) }),
-    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => beginSolo() }),
-    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => beginPlay("room", { t: "room_create", ...play() }) }),
+    h("button", { class: "btn primary", type: "button", "data-action": "queue", text: "Queue", onclick: () => beginPlay("queue", { t: "queue", mode: state.mode, length: state.length }) }),
+    h("button", { class: "btn", type: "button", "data-action": "practice", text: "Practice", onclick: () => startPractice() }),
+    h("button", { class: "btn", type: "button", "data-action": "create-room", text: "Create room", onclick: () => beginPlay("room", { t: "room_create", ...roomPlay() }) }),
     h("button", { class: "btn", type: "button", "data-action": "browse", text: "Open rooms", onclick: openBrowse }),
   );
   box.append(actions);
@@ -571,8 +605,7 @@ function roomView() {
   const box = h("div", {});
   box.append(h("h2", { class: "lead", text: "Room" }));
   box.append(h("div", { class: "code", id: "room-code-label", text: room?.code || "" }));
-  const roomLength = lengthInfo(state.length)?.title || "Sprint";
-  box.append(h("p", { class: "muted", text: `${MODES[room?.mode || state.mode].title} · ${roomLength} · Unranked. No rating change. Listed in Open rooms until the host starts.` }));
+  box.append(h("p", { id: "room-meta", class: "muted", text: `${settingLine(room?.mode || state.mode, room?.length || state.length, room?.format, room?.durationMs)}. No rating change. Listed in Open rooms until the host starts.` }));
   const list = h("ul", { class: "room-list", id: "room-players" });
   box.append(list);
   const actions = h("div", { class: "actions" });
@@ -660,9 +693,7 @@ function paintRooms() {
     head.append(h("strong", { class: "room-code", text: room.code || "" }));
     head.append(h("span", { class: "room-count", text: `${count} of ${max}` }));
     card.append(head);
-    const modeTitle = MODES[room.mode]?.title || "Desktop";
-    const lengthTitle = lengthInfo(room.length)?.title || "Sprint";
-    card.append(h("p", { class: "muted", text: `${modeTitle} · ${lengthTitle} · Unranked` }));
+    card.append(h("p", { class: "muted", text: settingLine(room.mode, room.length, room.format, room.durationMs) }));
     const list = h("ul", { class: "room-list" });
     for (const player of room.players || []) {
       const item = h("li", {});
@@ -686,15 +717,14 @@ function paintRooms() {
 function raceView() {
   inputSession = emptyInputSession();
   refocusTries = 0;
-  const box = h("div", { class: "race", "data-mode": state.mode });
+  const box = h("div", { class: "race", "data-mode": state.mode, "data-format": state.format || "passage" });
   box.append(h("div", {
     id: "race-link",
     class: "net-banner",
     hidden: true,
   }));
   const top = h("div", { class: "race-top" });
-  const raceLength = state.daily ? "Set" : (lengthInfo(state.length)?.title || "Sprint");
-  top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${racePillText()}` }));
+  top.append(h("span", { class: "pill", text: raceHeading() }));
   const stats = h("div", {
     class: "live-stats",
     id: "stats",
@@ -716,6 +746,7 @@ function raceView() {
     onclick: requestLeave,
   }));
   box.append(top);
+  if (state.format === "timed") box.append(timedClock());
   const wrap = h("div", { class: "passage-wrap" });
   wrap.append(h("div", { class: "count", id: "count", hidden: true }));
   wrap.append(h("p", { class: "passage", id: "passage" }));
@@ -872,6 +903,7 @@ function paintShift() {
 }
 
 function resultsCopy() {
+  if (state.results?.format === "timed") return timedHeadline(state.results.rows, state.me?.id);
   if (state.results?.cancelled) return { title: "Room closed", detail: "Everyone left before a finish." };
   const rows = state.results?.rows || [];
   const me = rows.find((row) => row.id === state.me?.id);
@@ -896,9 +928,10 @@ function resultsView() {
   const copy = resultsCopy();
   box.append(h("h2", { class: "lead", text: copy.title }));
   if (copy.detail) box.append(h("p", { class: "muted", text: copy.detail }));
-  if (!state.results?.cancelled && raceStandingWord() === "Unranked") {
-    box.append(h("p", { class: "pill", text: "Unranked" }));
-  }
+  const formatLine = resultFormatLine(state.results);
+  const showUnranked = !state.results?.cancelled && (formatLine || raceStandingWord() === "Unranked");
+  if (showUnranked) box.append(h("p", { class: "pill", text: "Unranked" }));
+  if (formatLine) box.append(h("p", { class: "hint", text: formatLine }));
   if (!state.results?.cancelled) {
     box.append(h("p", { class: "quote", text: state.results?.sentence || state.sentence }));
     const me = (state.results?.rows || []).find((row) => row.id === state.me?.id);
@@ -926,15 +959,17 @@ function announceResults() {
   const copy = resultsCopy();
   const rows = state.results?.rows || [];
   const me = rows.find((row) => row.id === state.me?.id);
+  const formatLine = resultFormatLine(state.results);
+  const title = formatLine ? `${formatLine} ${copy.title}` : copy.title;
   if (!me) {
-    announce(copy.detail ? `${copy.title}. ${copy.detail}` : copy.title);
+    announce(copy.detail ? `${title}. ${copy.detail}` : title);
     return;
   }
   const wpm = Number(me.wpm);
   const pace = Number.isFinite(wpm) ? `${wpm.toFixed(1)} words per minute` : "no pace";
   const accuracy = Number.isFinite(Number(me.accuracy)) ? `${me.accuracy}% accuracy` : "no accuracy";
   const place = placeLabel(me);
-  announce(`${copy.title}. ${pace}, ${accuracy}, place ${place}.`);
+  announce(`${title}. ${pace}, ${accuracy}, place ${place}.`);
 }
 
 function rematchNames(ids) {
@@ -989,9 +1024,14 @@ function askRematch() {
     sendLobby({ t: "rematch_cancel" });
     return;
   }
-  const alone = state.localPractice || !state.ranked || (state.players || []).length < 2;
+  const roomFormat = state.format === "timed" || state.format === "punctuation";
+  const alone = state.localPractice || (!state.ranked && !roomFormat) || (state.players || []).length < 2;
   if (alone) {
     releaseRaceSocket();
+    if (state.format === "timed" && state.session === "in") {
+      beginPlay("practice", { t: "practice", mode: state.mode, length: state.length, format: "timed", durationMs: state.durationMs || 60000 });
+      return;
+    }
     beginSolo();
     return;
   }
@@ -1063,6 +1103,18 @@ function raceStandingWord() {
   return "practice";
 }
 
+function raceHeading() {
+  const ladder = MODES[state.mode]?.title || "Desktop";
+  if (state.daily) return `${ladder} · Set · ${racePillText()}`;
+  if (state.format === "timed") return `${ladder} · ${formatSummary("timed", state.durationMs, "")}`;
+  if (state.format === "punctuation") {
+    const lengthTitle = lengthInfo(state.length)?.title || "Sprint";
+    return `${ladder} · ${formatSummary("punctuation", 0, lengthTitle)}`;
+  }
+  const raceLength = lengthInfo(state.length)?.title || "Sprint";
+  return `${ladder} · ${raceLength} · ${racePillText()}`;
+}
+
 function racePillText() {
   if (state.daily) return state.daily.practice ? "Daily practice" : "Daily challenge";
   if (state.versus?.kind === "bot" || state.versus?.kind === "ghost") {
@@ -1076,6 +1128,7 @@ function racePillText() {
 }
 
 function eloText(row) {
+  if (state.results?.format === "timed" || state.results?.format === "punctuation") return "Unranked";
   if (row.eloAfter != null && row.eloBefore != null) return formatDelta(row.eloAfter - row.eloBefore);
   if (raceKind() === "room") return "Unranked";
   return "unrated";
@@ -1102,6 +1155,7 @@ function paintDynamic() {
   if (state.shell === "lobby" || state.shell === "auth") {
     paintModes();
     paintLengths();
+    paintFormats();
     paintVersus();
     paintDaily();
   }
@@ -1117,6 +1171,7 @@ function paintDynamic() {
   if (state.shell === "race") {
     paintPassage();
     paintStats();
+    paintTimedClock();
     paintLocked();
     paintRaceNote();
     paintRaceBanner();
@@ -1246,6 +1301,10 @@ function paintRaceBanner() {
 }
 
 function paintRoom() {
+  const meta = document.getElementById("room-meta");
+  if (meta && state.room) {
+    meta.textContent = `${settingLine(state.room.mode || state.mode, state.room.length || state.length, state.room.format, state.room.durationMs)}. No rating change. Listed in Open rooms until the host starts.`;
+  }
   const list = document.getElementById("room-players");
   if (!list || !state.room) return;
   list.replaceChildren();
@@ -1564,7 +1623,8 @@ function commitTyping(effect) {
   if (!result.changed) return;
   state.ok = result.ok;
   state.err = result.err;
-  for (const step of result.steps) {
+  const steps = state.format === "timed" ? presentTimedSteps(result.steps) : result.steps;
+  for (const step of steps) {
     state.typed = step.text;
     if (step.kind === "fin") state.phase = "finishing";
     if (state.daily && !state.daily.practice) noteDailyStep(state.daily.steps, step.text, DAILY_MAX_STEPS);
@@ -1706,6 +1766,146 @@ function paintLanes() {
   }
 }
 
+function formatControls() {
+  const choice = choiceFor(state.format, state.durationMs);
+  return {
+    mode: state.mode,
+    format: state.format,
+    choiceId: choice.id,
+    onChoice: chooseFormat,
+  };
+}
+
+function chooseFormat(info) {
+  if (state.shell === "race" || state.shell === "queue" || state.shell === "room") return;
+  if (!info || (info.format === "punctuation" && !punctuationAllowed(state.mode))) return;
+  state.format = info.format;
+  state.durationMs = info.format === "timed" ? info.durationMs : 0;
+  saveFormatChoice(null, state.format, info.durationMs);
+  paintFormats();
+}
+
+function paintFormats() {
+  const choice = choiceFor(state.format, state.durationMs);
+  for (const button of document.querySelectorAll(".format-choice[data-choice]")) {
+    const on = button.dataset.choice === choice.id;
+    button.classList.toggle("selected", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.disabled = button.dataset.choice === "punctuation" && !punctuationAllowed(state.mode);
+  }
+  const note = document.getElementById("format-note");
+  if (note) note.hidden = state.mode !== "cursor";
+  const queue = document.getElementById("format-queue-note");
+  if (queue) queue.hidden = state.format === "passage";
+}
+
+function restoreFormatChoice() {
+  const choice = loadFormatChoice();
+  if (choice.format === "punctuation" && !punctuationAllowed(state.mode)) {
+    state.format = "passage";
+    state.durationMs = 0;
+    return;
+  }
+  state.format = choice.format;
+  state.durationMs = choice.format === "timed" ? choice.durationMs : 0;
+}
+
+function roomPlay() {
+  return {
+    mode: state.mode,
+    length: state.length,
+    format: state.format,
+    durationMs: state.format === "timed" ? (state.durationMs || 60000) : 0,
+  };
+}
+
+function settingLine(mode, length, format, durationMs) {
+  const ladder = MODES[mode]?.title || "Desktop";
+  const lengthTitle = lengthInfo(length)?.title || "Sprint";
+  const id = readFormat(format);
+  if (id === "passage") return `${ladder} · ${lengthTitle} · Unranked`;
+  return `${ladder} · ${formatSummary(id, durationMs, lengthTitle)}`;
+}
+
+function startPractice() {
+  if (state.format === "punctuation" && !punctuationAllowed(state.mode)) {
+    toast(CURSOR_PUNCTUATION_NOTE);
+    return;
+  }
+  if (state.format === "timed") {
+    if (state.session !== "in") {
+      toast("Timed practice uses the server clock. Sign in to start it.");
+      return;
+    }
+    beginPlay("practice", {
+      t: "practice",
+      mode: state.mode,
+      length: state.length,
+      format: "timed",
+      durationMs: state.durationMs || 60000,
+    });
+    return;
+  }
+  beginSolo({ format: state.format === "punctuation" ? "punctuation" : "passage" });
+}
+
+function timedClock() {
+  const clock = h("div", { class: "timed-clock", id: "timed-clock", role: "group", "aria-label": "Time remaining" });
+  clock.append(h("p", { class: "timed-remaining", id: "timed-remaining", text: "" }));
+  const track = h("div", { class: "timed-track" });
+  track.append(h("div", { class: "timed-fill", id: "timed-fill" }));
+  clock.append(track);
+  return clock;
+}
+
+function paintTimedClock() {
+  if (state.format !== "timed") return;
+  const label = document.getElementById("timed-remaining");
+  const fill = document.getElementById("timed-fill");
+  if (!label || !fill) return;
+  const model = timerModel(remainingMs(state.startAt, state.durationMs, serverNow()), state.durationMs);
+  label.textContent = model.done ? "0s" : `${model.label} left`;
+  fill.style.width = `${model.percent}%`;
+}
+
+function announceRaceStart() {
+  if (state.format === "timed") {
+    if (!state.startAt) return;
+    const seconds = Math.round(readDurationMs(state.durationMs) / 1000);
+    announce(`Go. Timed race started. ${seconds} seconds.`);
+    return;
+  }
+  announce("Go. Race started.");
+}
+
+function noteRaceFormat(msg) {
+  const format = readFormat(msg?.format);
+  state.format = format;
+  state.durationMs = format === "timed" ? readDurationMs(msg?.durationMs) : 0;
+  const id = msg?.raceId || state.raceId;
+  if (id) rememberRaceMeta(null, id, { format, durationMs: state.durationMs, length: msg?.length || state.length });
+}
+
+function absorbChunk(msg) {
+  if (msg?.serverNow) state.offset = msg.serverNow - Date.now();
+  const next = applyChunk(state.sentence, msg?.sentence);
+  if (next === state.sentence) return;
+  state.sentence = next;
+  if (state.shell === "race") paintPassage();
+}
+
+function withRaceMeta(race) {
+  const row = serverRaceRow(race, lengthOfText);
+  const meta = raceMetaFor(null, race?.id);
+  if (!meta || (meta.format !== "timed" && meta.format !== "punctuation")) return row;
+  row.format = meta.format;
+  row.durationMs = meta.durationMs;
+  row.label = "Unranked";
+  row.ranked = false;
+  if (meta.length) row.length = meta.length;
+  return row;
+}
+
 function rememberPreference(key, value) {
   try {
     if (value) localStorage.setItem(key, value);
@@ -1719,7 +1919,13 @@ function chooseMode(mode) {
   if (!MODES[mode]) return;
   state.mode = mode;
   rememberPreference("tg_mode", mode);
+  if (state.format === "punctuation" && !punctuationAllowed(mode)) {
+    state.format = "passage";
+    state.durationMs = 0;
+    saveFormatChoice(null, "passage", 0);
+  }
   paintModes();
+  paintFormats();
   paintVersus();
   paintDaily();
   pullBoard();
@@ -1992,6 +2198,7 @@ function startMatch(msg) {
   state.raceId = msg.raceId;
   state.mode = msg.mode;
   if (msg.length) state.length = msg.length;
+  noteRaceFormat(msg);
   state.ranked = msg.ranked;
   state.kind = msg.kind || (msg.ranked ? "queue" : ((msg.players || []).length >= 2 ? "room" : "practice"));
   state.players = msg.players || [];
@@ -2018,7 +2225,7 @@ function startMatch(msg) {
   localStorage.setItem("tg_mode", state.mode);
   if (state.length) localStorage.setItem("tg_length", state.length);
   ensure();
-  if (state.phase === "race") announce("Go. Race started.");
+  if (state.phase === "race") announceRaceStart();
   openRace(msg.raceId);
   focusCapture();
 }
@@ -2060,7 +2267,8 @@ function openRace(raceId) {
       state.raceLink = "up";
       stopRaceRetry();
       absorbHello(msg);
-    } else if (msg.t === "state") absorbState(msg);
+    } else if (msg.t === "chunk") absorbChunk(msg);
+    else if (msg.t === "state") absorbState(msg);
     else if (msg.t === "results") absorbResults(msg);
     else if (msg.t === "left") finishLocalLeave(mine);
     else if (msg.t === "wait") {
@@ -2129,6 +2337,7 @@ function absorbHello(msg) {
   state.offset = msg.serverNow - Date.now();
   state.mode = msg.mode;
   if (msg.length) state.length = msg.length;
+  noteRaceFormat(msg);
   state.ranked = msg.ranked;
   state.kind = msg.kind || state.kind || (msg.ranked ? "queue" : ((msg.players || state.players || []).length >= 2 ? "room" : "practice"));
   state.players = msg.players || state.players;
@@ -2157,7 +2366,8 @@ function absorbHello(msg) {
   if (mine?.finishedAt) state.phase = "finishing";
   else state.phase = serverNow() < state.startAt ? "countdown" : "race";
   const painted = document.querySelector(".race");
-  if (painted && painted.dataset.mode !== state.mode) state.shell = "";
+  const paintedFormat = painted?.dataset.format || "passage";
+  if (painted && (painted.dataset.mode !== state.mode || paintedFormat !== (state.format || "passage"))) state.shell = "";
   ensure();
   noteFinishes();
   if (state.mode === "cursor") document.getElementById("capture")?.blur();
@@ -2230,6 +2440,7 @@ function exitToLobby() {
   state.versus = null;
   state.trace = [];
   state.daily = null;
+  restoreFormatChoice();
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
@@ -2337,7 +2548,7 @@ function commitLeave() {
 function practiceAgain() {
   if (state.playLock) return;
   releaseRaceSocket();
-  beginSolo();
+  startPractice();
 }
 
 function queueAgain() {
@@ -2438,12 +2649,13 @@ setInterval(() => {
   }
   tickVersus();
   paintStats();
+  paintTimedClock();
 }, 80);
 
 function beginRace() {
   if (state.phase !== "countdown") return;
   state.phase = "race";
-  announce("Go. Race started.");
+  announceRaceStart();
   setPageTitle();
   focusCapture();
 }
@@ -2655,7 +2867,7 @@ function refreshAfterRace() {
 }
 
 function sideRecent() {
-  const server = state.session === "in" ? state.recent.map((race) => serverRaceRow(race, lengthOfText)) : [];
+  const server = state.session === "in" ? state.recent.map(withRaceMeta) : [];
   return buildStatsModel({ local: state.localRuns, server, passageIdForText }).recent.slice(0, 8);
 }
 
@@ -2714,6 +2926,7 @@ function freshSeed() {
 function soloPatch(options = {}) {
   const avoid = state.localRuns.slice(-RECENT_AVOID).map((run) => run.passageId).filter(Boolean);
   if (state.passageId) avoid.push(state.passageId);
+  const format = options.format === "punctuation" ? "punctuation" : "passage";
   return soloStart({
     mode: state.mode,
     length: state.length,
@@ -2722,6 +2935,7 @@ function soloPatch(options = {}) {
     avoid,
     passageId: options.passageId || (options.same ? state.passageId : ""),
     same: Boolean(options.same),
+    format,
   });
 }
 
@@ -2757,9 +2971,15 @@ function openLocalRace(patch, versus) {
 }
 
 function beginSolo(options = {}) {
-  const patch = soloPatch(options);
+  const format = options.format || (state.format === "punctuation" ? "punctuation" : "passage");
+  if (format === "punctuation" && !punctuationAllowed(state.mode)) {
+    toast(CURSOR_PUNCTUATION_NOTE);
+    return;
+  }
+  const patch = soloPatch({ ...options, format });
   if (!openLocalRace(patch, null)) return;
-  announce("Go. Practice started.");
+  if (format === "punctuation") announce("Go. Punctuation practice started.");
+  else announce("Go. Practice started.");
 }
 
 function beginVersus(options = {}) {
@@ -3093,6 +3313,7 @@ function finishDailyRace() {
 function finishSolo() {
   if (!state.localPractice || state.soloSaved) return;
   state.soloSaved = true;
+  const punctuation = state.format === "punctuation";
   const run = soloFinish({
     sentence: state.sentence,
     startAt: state.startAt,
@@ -3102,25 +3323,28 @@ function finishSolo() {
     mode: state.mode,
     length: state.length,
     passageId: state.passageId,
+    format: punctuation ? "punctuation" : "passage",
   });
   run.opponent = state.versus?.kind === "bot" || state.versus?.kind === "ghost" ? state.versus.kind : "";
   state.soloRun = run;
   state.localRuns = appendRun(state.localRuns, run);
   if (!saveHistory(state.localRuns)) toast("This browser did not save the practice run.");
-  const samples = finishTrace(state.trace, run.ms, state.sentence.length);
-  const next = considerGhost(state.ghosts, {
-    mode: run.mode,
-    length: run.length,
-    wpm: run.wpm,
-    accuracy: run.accuracy,
-    ms: run.ms,
-    chars: state.sentence.length,
-    passageId: state.passageId,
-    samples,
-  });
-  if (next.kept) {
-    state.ghosts = next.bests;
-    if (!saveGhosts(state.ghosts)) toast("This browser did not save the ghost.");
+  if (!punctuation) {
+    const samples = finishTrace(state.trace, run.ms, state.sentence.length);
+    const next = considerGhost(state.ghosts, {
+      mode: run.mode,
+      length: run.length,
+      wpm: run.wpm,
+      accuracy: run.accuracy,
+      ms: run.ms,
+      chars: state.sentence.length,
+      passageId: state.passageId,
+      samples,
+    });
+    if (next.kept) {
+      state.ghosts = next.bests;
+      if (!saveGhosts(state.ghosts)) toast("This browser did not save the ghost.");
+    }
   }
   state.phase = "results";
   state.shell = "";
@@ -3167,7 +3391,8 @@ function announceSolo() {
   const seconds = (Number(run.ms) / 1000).toFixed(1);
   const detail = `${Number(run.wpm).toFixed(1)} words per minute, ${run.accuracy}% accuracy, ${seconds} seconds, ${run.errors} errors.`;
   if (!state.versus) {
-    announce(`Practice finished. ${detail}`);
+    if (run.format === "punctuation") announce(`Punctuation practice finished. Unranked. ${detail}`);
+    else announce(`Practice finished. ${detail}`);
     return;
   }
   const outcome = versusOutcome();
@@ -3203,8 +3428,11 @@ function soloResultsView() {
     });
     return box;
   }
+  const punctuation = run.format === "punctuation";
   renderSoloResults(box, h, {
     sentence: state.sentence,
+    badge: punctuation ? "Unranked" : "Practice",
+    formatLine: punctuation ? "Punctuation · Unranked. This run stays on this browser." : "",
     wpm: run.wpm || 0,
     accuracy: run.accuracy || 0,
     ms: run.ms || 0,
@@ -3234,7 +3462,11 @@ function statsActions() {
       state.route = "";
       rememberPreference("tg_mode", state.mode);
       rememberPreference("tg_length", state.length);
-      beginSolo({ same: true, passageId: run.passageId });
+      beginSolo({
+        same: true,
+        passageId: run.passageId,
+        format: run.format === "punctuation" ? "punctuation" : "passage",
+      });
     },
     onExport: downloadHistory,
     onAskClear: () => {
@@ -3267,7 +3499,7 @@ function paintStatsPage() {
   if (token === statsToken && root.childElementCount) return;
   statsToken = token;
   root.replaceChildren();
-  const server = state.session === "in" ? state.recent.map((race) => serverRaceRow(race, lengthOfText)) : [];
+  const server = state.session === "in" ? state.recent.map(withRaceMeta) : [];
   renderStats(root, h, buildStatsModel({ local: state.localRuns, server, passageIdForText }), statsActions());
 }
 

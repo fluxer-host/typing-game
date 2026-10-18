@@ -215,6 +215,7 @@ export function saveStatements(race, plan) {
       delta: 0,
       countRace: false,
     };
+    const keepBest = race.format !== "timed" && race.format !== "punctuation";
     if (planned.countRace) {
       const won = countsAsWin(row) ? 1 : 0;
       const finished = row.ms != null ? 1 : 0;
@@ -234,7 +235,7 @@ export function saveStatements(race, plan) {
             )`,
         binds: [planned.delta, won, finished, row.wpm, row.wpm, now, row.id, race.id, row.id],
       });
-    } else if (row.ms != null) {
+    } else if (row.ms != null && keepBest) {
       statements.push({
         sql: `UPDATE users SET
             ${cols.best} = CASE
@@ -273,7 +274,8 @@ export function saveStatements(race, plan) {
 export async function saveRace(env, race) {
   const cols = columns(race.mode);
   const ids = (race.rows || []).map((row) => row.id);
-  const rated = Boolean(race.ranked) && ids.length >= 2;
+  const unrankedFormat = race.format === "timed" || race.format === "punctuation";
+  const rated = Boolean(race.ranked) && ids.length >= 2 && !unrankedFormat;
   let elos = {};
   let pairCounts = {};
   if (rated) {

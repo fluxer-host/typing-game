@@ -1,4 +1,5 @@
 import { accuracy, wpm } from "../src/score.js";
+import { punctuationById, pickPunctuationRecord } from "../src/punctuation.js";
 import { countForLength, passageById, pickPassageRecord } from "../src/sentences.js";
 
 export function soloPlayer(me) {
@@ -15,15 +16,19 @@ export function passageFits(record, mode, length) {
   return false;
 }
 
-export function soloStart({ mode, length, me, now, avoid = [], passageId = "", same = false, random } = {}) {
+export function soloStart({ mode, length, me, now, avoid = [], passageId = "", same = false, random, format } = {}) {
   const count = countForLength(length);
+  const punctuation = format === "punctuation";
   let record = null;
   if (passageId) {
-    const found = passageById(passageId);
-    if (passageFits(found, mode, length)) record = found;
+    const found = punctuation ? punctuationById(passageId) : passageById(passageId);
+    if (punctuation) {
+      if (found && found.length === length) record = found;
+    } else if (passageFits(found, mode, length)) record = found;
   }
   if (!record) {
-    record = pickPassageRecord(mode, count, {
+    const pick = punctuation ? pickPunctuationRecord : pickPassageRecord;
+    record = pick(mode, count, {
       avoid: same ? [] : avoid,
       random,
     });
@@ -58,17 +63,19 @@ export function soloStart({ mode, length, me, now, avoid = [], passageId = "", s
     room: null,
     queue: null,
     shift: false,
+    format: punctuation ? "punctuation" : "passage",
+    durationMs: 0,
   };
 }
 
-export function soloFinish({ sentence, startAt, now, ok, err, mode, length, passageId } = {}) {
+export function soloFinish({ sentence, startAt, now, ok, err, mode, length, passageId, format } = {}) {
   const end = Number.isFinite(Number(now)) ? Number(now) : 0;
   const start = Number.isFinite(Number(startAt)) ? Number(startAt) : end;
   const ms = Math.max(1, end - start);
   const chars = typeof sentence === "string" ? sentence.length : 0;
   const good = Number.isFinite(Number(ok)) ? Number(ok) : 0;
   const bad = Number.isFinite(Number(err)) ? Number(err) : 0;
-  return {
+  const row = {
     at: end,
     mode,
     length,
@@ -79,4 +86,6 @@ export function soloFinish({ sentence, startAt, now, ok, err, mode, length, pass
     errors: bad > 0 ? bad : 0,
     ranked: false,
   };
+  if (format === "punctuation") row.format = "punctuation";
+  return row;
 }

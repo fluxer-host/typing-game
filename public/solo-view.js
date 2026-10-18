@@ -8,9 +8,10 @@ function stat(h, label, value) {
 }
 
 export function renderSoloResults(parent, h, view) {
-  parent.append(h("h2", { class: "lead", text: "Practice results" }));
-  parent.append(h("p", { class: "pill", text: "Practice" }));
-  parent.append(h("p", { class: "muted", text: "This run stays on this browser. It is not ranked." }));
+  parent.append(h("h2", { class: "lead", text: view.title || "Practice results" }));
+  parent.append(h("p", { class: "pill", text: view.badge || "Practice" }));
+  parent.append(h("p", { class: "muted", text: view.summary || "This run stays on this browser. It is not ranked." }));
+  if (view.formatLine) parent.append(h("p", { class: "hint", text: view.formatLine }));
   parent.append(h("p", { class: "quote", text: view.sentence || "" }));
   if (view.officialNote) parent.append(h("p", { class: "hint official-note", text: view.officialNote }));
   const stats = h("div", { class: "solo-stats" });

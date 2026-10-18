@@ -1,13 +1,17 @@
 import { getUsers } from "./db.js";
 import { json } from "./http.js";
 import { resolveUser } from "./identity.js";
+import { CURSOR_PUNCTUATION_NOTE, punctuationAllowed, readFormat, settingsForKind } from "./formats.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { nextMatchAt, nextQueuedAt, normalizeKind, pickGroup } from "./match.js";
 import { isMode } from "./modes.js";
 import { websocketOriginAllowed } from "./origin.js";
+import { pickPunctuationRecord } from "./punctuation.js";
 import { publicPlayer } from "./profile.js";
 import { REMATCH_TTL_MS, rematchExpired } from "./retention.js";
 import { pickPassageRecord, rememberIds, unionAvoid } from "./sentences.js";
+import { freshSeed, timedPool } from "./timed-race.js";
+import { openStream } from "./timed.js";
 
 const GATHER_MS = 1500;
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -38,6 +42,8 @@ export function summarizeRooms(entries) {
       code,
       mode: host.mode,
       length: readLength(host.length),
+      format: readFormat(host.format),
+      durationMs: readFormat(host.format) === "timed" ? Number(host.durationMs) || 0 : 0,
       openedAt,
       players: members.map((entry) => ({
         id: entry.user?.id,
@@ -156,7 +162,10 @@ export class Lobby {
       let launched = false;
       try {
         const kind = normalizeKind(ready[0].att.kind, ready[0].att.ranked, ready.length);
-        launched = await this.launch(ready, mode, length, rankedFor(kind), kind);
+        launched = await this.launch(ready, mode, length, rankedFor(kind), kind, {
+          format: ready[0].att.format,
+          durationMs: ready[0].att.durationMs,
+        });
       } finally {
         this.rematchHold[raceId] = false;
       }
@@ -229,6 +238,8 @@ export class Lobby {
           code,
           mode: entry.att.mode,
           length: readLength(entry.att.length),
+          format: readFormat(entry.att.format),
+          durationMs: Number(entry.att.durationMs) || 0,
           youHost: Boolean(entry.att.host),
           players,
         });
@@ -330,11 +341,17 @@ export class Lobby {
 
     if (msg.t === "practice") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
+      const play = settingsForKind("practice", msg);
+      if (play.format === "punctuation" && !punctuationAllowed(msg.mode)) {
+        return this.send(ws, { t: "error", error: CURSOR_PUNCTUATION_NOTE });
+      }
       await this.releaseGroup(ws, att);
       att.mode = msg.mode;
       att.length = readLength(msg.length);
+      att.format = play.format;
+      att.durationMs = play.durationMs;
       ws.serializeAttachment(att);
-      await this.launch([{ ws, att }], att.mode, att.length, rankedFor("practice"), "practice");
+      await this.launch([{ ws, att }], att.mode, att.length, rankedFor("practice"), "practice", play);
       return;
     }
 
@@ -351,6 +368,8 @@ export class Lobby {
         att.length = readLength(record.length);
         att.ranked = Boolean(record.ranked);
         att.kind = normalizeKind(record.kind, record.ranked, record.ids?.length || 0);
+        att.format = readFormat(record.format);
+        att.durationMs = Number(record.durationMs) || 0;
       }
       const previousRoom = att.status === "room" ? att.room : null;
       const previous = att.status === "queue" ? { mode: att.mode, length: readLength(att.length) } : null;
@@ -378,6 +397,10 @@ export class Lobby {
 
     if (msg.t === "room_create") {
       if (!isMode(msg.mode)) return this.send(ws, { t: "error", error: "Pick a mode." });
+      const play = settingsForKind("room", msg);
+      if (play.format === "punctuation" && !punctuationAllowed(msg.mode)) {
+        return this.send(ws, { t: "error", error: CURSOR_PUNCTUATION_NOTE });
+      }
       await this.releaseGroup(ws, att);
       const previousRoom = att.status === "room" ? att.room : null;
       let code = roomCode();
@@ -385,6 +408,8 @@ export class Lobby {
       att.status = "room";
       att.mode = msg.mode;
       att.length = readLength(msg.length);
+      att.format = play.format;
+      att.durationMs = play.durationMs;
       att.room = code;
       att.host = true;
       att.openedAt = Date.now();
@@ -406,6 +431,8 @@ export class Lobby {
       att.status = "room";
       att.mode = host.att.mode;
       att.length = readLength(host.att.length);
+      att.format = readFormat(host.att.format);
+      att.durationMs = Number(host.att.durationMs) || 0;
       att.room = code;
       att.host = false;
       att.openedAt = host.att.openedAt || Date.now();
@@ -422,7 +449,10 @@ export class Lobby {
         this.send(ws, { t: "error", error: "Need two racers in the room." });
         return;
       }
-      await this.launch(members, att.mode, readLength(att.length), rankedFor("room"), "room");
+      await this.launch(members, att.mode, readLength(att.length), rankedFor("room"), "room", {
+        format: att.format,
+        durationMs: att.durationMs,
+      });
       return;
     }
 
@@ -630,7 +660,7 @@ export class Lobby {
     await this.planWindow(mode, lane, left);
   }
 
-  async launch(members, mode, length, ranked, kind) {
+  async launch(members, mode, length, ranked, kind, play = {}) {
     const open = members.filter((entry) => entry.ws.readyState === WebSocket.OPEN);
     const seen = new Set();
     const live = [];
@@ -662,14 +692,42 @@ export class Lobby {
       });
       const lane = readLength(length);
       const raceId = crypto.randomUUID();
-      const record = pickPassageRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
-      const sentence = record?.text || "";
+      const settings = settingsForKind(raceKind, play);
+      let record = null;
+      let sentence = "";
+      let seed = 0;
+      if (settings.format === "timed") {
+        seed = Number.isFinite(Number(play.seed)) ? Number(play.seed) >>> 0 : freshSeed();
+        const opened = openStream(timedPool(mode), seed);
+        sentence = opened.sentence;
+        if (!sentence) throw new Error("timed");
+      } else if (settings.format === "punctuation") {
+        if (!punctuationAllowed(mode)) throw new Error("cursor");
+        record = pickPunctuationRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
+        sentence = record?.text || "";
+        if (!sentence) throw new Error("punctuation");
+      } else {
+        record = pickPassageRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
+        sentence = record?.text || "";
+      }
       const startAt = Date.now() + 3000;
       const stub = this.env.RACE.get(this.env.RACE.idFromName(raceId));
       const response = await stub.fetch("https://race.internal/init", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ raceId, sentence, startAt, mode, length: lane, ranked: rated, kind: raceKind, players }),
+        body: JSON.stringify({
+          raceId,
+          sentence,
+          startAt,
+          mode,
+          length: lane,
+          ranked: rated,
+          kind: raceKind,
+          players,
+          format: settings.format,
+          durationMs: settings.durationMs,
+          seed,
+        }),
       });
       if (!response.ok) throw new Error(`race init ${response.status}`);
       if (record?.id) this.rememberLaunch(live, record.id);
@@ -678,6 +736,8 @@ export class Lobby {
         length: lane,
         ranked: rated,
         kind: raceKind,
+        format: settings.format,
+        durationMs: settings.durationMs,
         ids: players.map((player) => player.id),
         until: Date.now() + REMATCH_TTL_MS,
       });
@@ -691,12 +751,16 @@ export class Lobby {
         length: lane,
         ranked: rated,
         kind: raceKind,
+        format: settings.format,
+        durationMs: settings.durationMs,
         players,
       };
       for (const entry of live) {
         entry.att.lastRace = raceId;
         entry.att.mode = mode;
         entry.att.length = lane;
+        entry.att.format = settings.format;
+        entry.att.durationMs = settings.durationMs;
         entry.att.ranked = rated;
         entry.att.kind = raceKind;
         entry.att.status = "matched";

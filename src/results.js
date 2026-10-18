@@ -1,5 +1,6 @@
 import { applyElo, eloDeltas } from "./elo.js";
 import { accuracy, wpm } from "./score.js";
+import { buildTimedResults } from "./timed.js";
 
 function presenceOf(state, id) {
   return state.presence?.[id] || {};
@@ -57,6 +58,7 @@ function raceKind(state, rowCount) {
 }
 
 export function buildResults(state, now) {
+  if (state?.format === "timed") return buildTimedResults(state, now);
   const rows = ordered(state);
   const rated = Boolean(state.ranked) && rows.length >= 2;
   const deltas = rated
@@ -67,6 +69,7 @@ export function buildResults(state, now) {
     ranked: Boolean(state.ranked),
     kind: raceKind(state, rows.length),
     mode: state.mode,
+    ...(state.format === "punctuation" ? { format: "punctuation" } : {}),
     sentence: state.sentence,
     rows: rows.map((row) => {
       const before = row.player.eloAtStart ?? 1000;

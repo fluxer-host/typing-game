@@ -142,6 +142,33 @@ test("recent labels name the ladder and hide a practice place", () => {
   assert.equal(formatRunDate("nope"), "");
 });
 
+test("timed and punctuation bests are stored apart from passage bests", () => {
+  const passage = normalizeRun(run());
+  assert.equal(passage.format, undefined);
+  const timed = normalizeRun(run({ format: "timed", durationMs: 30000, wpm: 40 }));
+  const marks = normalizeRun(run({ format: "punctuation", wpm: 55 }));
+  assert.equal(timed.format, "timed");
+  assert.equal(timed.durationMs, 30000);
+  assert.equal(marks.format, "punctuation");
+  const bests = personalBests([
+    passage,
+    timed,
+    marks,
+    run({ format: "timed", durationMs: 30000, wpm: 50, accuracy: 90 }),
+  ]);
+  assert.equal(bests["desktop|sprint"].wpm, 40);
+  assert.equal(bests["desktop|timed|30000"].wpm, 50);
+  assert.equal(bests["desktop|punctuation|sprint"].wpm, 55);
+  const timedLabel = recentLabel(timed);
+  assert.equal(timedLabel.includes("Timed 30s"), true);
+  assert.equal(timedLabel.includes("Unranked"), true);
+  assert.equal(timedLabel.includes("Practice"), false);
+  const punctLabel = recentLabel(marks);
+  assert.equal(punctLabel.includes("Punctuation"), true);
+  assert.equal(punctLabel.includes("Sprint"), true);
+  assert.equal(punctLabel.includes("Unranked"), true);
+});
+
 test("local and server rows merge in time order", () => {
   const merged = mergeRuns(
     [run({ at: 20, passageId: "local" })],

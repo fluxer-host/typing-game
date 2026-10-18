@@ -565,6 +565,20 @@ test("idle players are DNF only after the deadline", () => {
   assert.equal(resultsHeadline(results.rows, "a", false).title, "Timed out");
 });
 
+test("a drop during the race starts the grace at the drop", () => {
+  const start = race([racer("a", { lastActivity: 1_000_000 + 14_000 }), racer("b")]);
+  const dropped = applyRaceEvent(start, { type: "disconnect", playerId: "a" }, start.startAt + 16_000);
+  assert.equal(dropped.players.find((player) => player.id === "a").disconnectedAt, start.startAt + 16_000);
+  const back = applyRaceEvent(
+    { ...start, players: dropped.players },
+    { type: "reconnect", playerId: "a" },
+    start.startAt + 17_000,
+  );
+  assert.equal(back.resumed, true);
+  assert.equal(back.players.find((player) => player.id === "a").dnf, false);
+  assert.equal(back.players.find((player) => player.id === "a").lastActivity, start.startAt + 14_000);
+});
+
 test("a disconnect can resume inside the grace period and is DNF after it", () => {
   const start = race([racer("a"), racer("b")]);
   const dropped = applyRaceEvent(start, { type: "disconnect", playerId: "a" }, start.startAt + 5000);

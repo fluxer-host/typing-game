@@ -21,7 +21,7 @@ export const SESSION_CLEANUP_ROUNDS = 10;
 
 // reason is start, progress, finish, forfeit, dnf, disconnect, reconnect, or results.
 export function shouldWriteProgress({ reason, now, lastWrite, checkpointMs, dirty }) {
-  if (reason === "start" || reason === "finish" || reason === "forfeit" || reason === "dnf" || reason === "disconnect" || reason === "reconnect" || reason === "results") {
+  if (reason === "start" || reason === "finish" || reason === "forfeit" || reason === "dnf" || reason === "disconnect" || reason === "reconnect" || reason === "results" || reason === "chunk") {
     return true;
   }
   if (reason !== "progress" || !dirty) return false;

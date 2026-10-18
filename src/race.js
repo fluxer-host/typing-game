@@ -8,6 +8,9 @@ import { websocketOriginAllowed } from "./origin.js";
 import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
 import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
 import { buildResults } from "./results.js";
+import { readFormat } from "./formats.js";
+import { ensureTimedStream, prepareUnrankedInit, pullTimedReveal, timedLimitAction } from "./timed-race.js";
+import { reviewTimedSubmission, timedAlarmPlan } from "./timed.js";
 import {
   ALARM_COALESCE_MS,
   PROGRESS_CHECKPOINT_MS,
@@ -129,8 +132,11 @@ export class Race {
         const progress = this.state.progress[player.id] || {};
         const dq = Boolean(progress.dq);
         const connectedNow = connected.has(player.id);
-        let disconnectedAt = row.disconnectedAt ?? null;
-        if (!connectedNow && disconnectedAt == null && now >= this.state.startAt) disconnectedAt = this.state.startAt;
+        // Keep a missing stamp missing. Filling it with the race start made a
+        // reload after the grace window look expired, even when the socket
+        // had only just closed. The tick records the start for someone who
+        // never connected, and a disconnect event records the drop.
+        const disconnectedAt = row.disconnectedAt ?? null;
         const dnfReason = row.dnfReason === "idle" || row.dnfReason === "disconnect" ? row.dnfReason : (dq ? "dq" : null);
         return {
           id: player.id,
@@ -227,9 +233,20 @@ export class Race {
       return json({ error: "body" }, { status: 400 });
     }
     const length = isLength(body.length) ? body.length : "sprint";
-    const limitMs = LENGTHS[length].limitMs;
-    if (!isMode(body.mode) || !passageOk(body.mode, LENGTHS[length].sentences, body.sentence)) {
-      return json({ error: "race" }, { status: 400 });
+    const format = readFormat(body.format);
+    let limitMs = LENGTHS[length].limitMs;
+    let sentence = body.sentence;
+    let extra = {};
+    if (format === "passage") {
+      if (!isMode(body.mode) || !passageOk(body.mode, LENGTHS[length].sentences, body.sentence)) {
+        return json({ error: "race" }, { status: 400 });
+      }
+    } else {
+      const prepared = prepareUnrankedInit(body);
+      if (prepared.error) return json({ error: prepared.error }, { status: 400 });
+      limitMs = prepared.limitMs;
+      sentence = prepared.sentence;
+      extra = prepared.extra;
     }
     if (!Array.isArray(body.players) || body.players.length < 1 || body.players.length > 6) {
       return json({ error: "players" }, { status: 400 });
@@ -256,7 +273,8 @@ export class Race {
       limitMs,
       ranked,
       kind,
-      sentence: body.sentence,
+      sentence,
+      ...extra,
       startAt,
       players,
       progress: {},
@@ -279,6 +297,8 @@ export class Race {
       serverNow: Date.now(),
       mode: this.state.mode,
       length: this.state.length || "sprint",
+      format: this.state.format || "passage",
+      durationMs: this.state.durationMs || 0,
       ranked: this.state.ranked,
       kind: this.state.kind || normalizeKind(null, this.state.ranked, this.state.players.length),
       players: this.state.players,
@@ -356,15 +376,35 @@ export class Race {
     const progress = this.state.progress[player.id] || { text: "", i: 0, ok: 0, err: 0, total: 0, recent: [] };
     if (progress.dq) return;
     const recent = (progress.recent || []).filter((stamp) => now - stamp < RATE_WINDOW_MS && now - stamp >= 0);
-    const verdict = validateProgress({
-      passage: this.state.sentence,
-      previous: typeof progress.text === "string" ? progress.text : "",
-      next: msg.text,
-      elapsedMs: now - this.state.startAt,
-      recentStrokes: recent.length,
-      priorStrokes: progress.total || 0,
-      kind: msg.t,
-    });
+    const timed = this.state.format === "timed";
+    if (timed) ensureTimedStream(this.state, typeof msg.text === "string" ? msg.text.length : 0);
+    const verdict = timed
+      ? reviewTimedSubmission({
+        stream: this.state.stream,
+        previous: typeof progress.text === "string" ? progress.text : "",
+        next: msg.text,
+        elapsedMs: now - this.state.startAt,
+        recentStrokes: recent.length,
+        priorStrokes: progress.total || 0,
+        kind: msg.t,
+        now,
+        startAt: this.state.startAt,
+        durationMs: this.state.durationMs || this.state.limitMs,
+        ended: Boolean(this.state.results),
+      })
+      : validateProgress({
+        passage: this.state.sentence,
+        previous: typeof progress.text === "string" ? progress.text : "",
+        next: msg.text,
+        elapsedMs: now - this.state.startAt,
+        recentStrokes: recent.length,
+        priorStrokes: progress.total || 0,
+        kind: msg.t,
+      });
+    if (!verdict.ok && timed && (verdict.reason === "closed" || verdict.reason === "ended")) {
+      await this.finalize();
+      return;
+    }
     if (!verdict.ok) {
       const sync = { text: progress.text || "", ok: progress.ok || 0, err: progress.err || 0 };
       if (verdict.reason === "jump" && recoverableGap({
@@ -403,11 +443,13 @@ export class Race {
     this.state.progress[player.id] = progress;
     const activity = applyRaceEvent(this.decisionState(now), { type: "activity", playerId: player.id }, now);
     if (activity.ok) this.storeDecision(activity.players);
-    if (verdict.finished) {
+    if (verdict.finished && !timed) {
       this.state.finishes[player.id] = { at: now, ok: progress.ok, err: progress.err };
     }
-    await this.noteProgress(verdict.finished ? "finish" : "progress", now);
+    const chunk = timed ? pullTimedReveal(this.state, progress.i) : null;
+    await this.noteProgress(chunk ? "chunk" : (verdict.finished ? "finish" : "progress"), now);
     this.broadcast(this.snapshot());
+    if (chunk) this.broadcast({ t: "chunk", sentence: chunk, serverNow: now });
     await this.maybeFinish();
     await this.arm();
   }
@@ -518,11 +560,28 @@ export class Race {
       await this.purge();
       return;
     }
+    if (this.state.format === "timed") {
+      const action = timedAlarmPlan(this.state, now);
+      if (action === "ended") {
+        if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
+        return;
+      }
+    }
     if (this.state.results) {
       if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
       return;
     }
     const limitAt = this.state.startAt + (this.state.limitMs || RACE_LIMIT_MS);
+    if (now >= limitAt && this.state.format === "timed") {
+      this.state.timeUp = true;
+      const standing = this.currentEnd(now);
+      if (timedLimitAction(standing) === "cancel") {
+        await this.cancel();
+        return;
+      }
+      await this.finalize();
+      return;
+    }
     if (now >= limitAt) {
       const standing = this.currentEnd(now);
       if (standing === "cancel" || (Object.keys(this.state.finishes).length === 0 && this.connectedIds().size === 0 && standing !== "results")) {
@@ -574,6 +633,7 @@ export class Race {
         mode: this.state.mode,
         sentence: this.state.sentence,
         ranked: this.state.ranked,
+        format: this.state.format || "passage",
         startedAt: this.state.startAt,
         finishedAt: this.state.finishedAt || Date.now(),
         rows: this.state.results.rows,

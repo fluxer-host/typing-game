@@ -106,6 +106,10 @@ export function applyRaceEvent(state, event, now) {
     const notices = [];
     for (const entry of players) {
       if (isOut(entry)) continue;
+      // A player who has not connected yet is absent from the start. A live
+      // drop stamps its own time in the disconnect event, so this fallback
+      // must not run for that event.
+      if (!entry.connected && entry.disconnectedAt == null && now >= state.startAt) entry.disconnectedAt = state.startAt;
       if (!entry.connected && entry.disconnectedAt != null && now >= entry.disconnectedAt + RECONNECT_GRACE_MS) {
         entry.dnf = true;
         entry.dnfReason = "disconnect";
@@ -131,8 +135,9 @@ export function nextAlarmAt(state, now) {
   if (Number.isFinite(now) && now < state.startAt) next = Math.min(next, state.startAt);
   for (const player of state.players) {
     if (player.finished || player.forfeit || player.dnf) continue;
-    if (!player.connected && player.disconnectedAt != null) {
-      next = Math.min(next, player.disconnectedAt + RECONNECT_GRACE_MS);
+    if (!player.connected) {
+      const stamp = player.disconnectedAt == null ? state.startAt : player.disconnectedAt;
+      next = Math.min(next, stamp + RECONNECT_GRACE_MS);
     } else {
       const base = player.lastActivity == null ? state.startAt : Math.max(player.lastActivity, state.startAt);
       next = Math.min(next, base + IDLE_MS);
