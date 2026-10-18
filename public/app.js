@@ -49,6 +49,19 @@ import {
 import { soloFinish, soloStart } from "./solo.js";
 import { renderSoloResults } from "./solo-view.js";
 import { ensureShareMount } from "./share.js";
+import { inviteMessage, mountRoomShare, renderInvite } from "./invite.js";
+import {
+  JOIN_PAUSE_MS,
+  addressWithoutRoom,
+  clearPendingRoom,
+  inviteStatusForReason,
+  joinDecision,
+  normalizeRoomCode,
+  parseRoomSearch,
+  readPendingRoom,
+  roomOccupancy,
+  savePendingRoom,
+} from "../src/room-code.js";
 import { renderStats } from "./stats-view.js";
 import { BOT_PRESETS, BOT_WPM_MAX, BOT_WPM_MIN, clampBotWpm } from "./bot.js";
 import {
@@ -206,6 +219,7 @@ const state = {
   live: [],
   results: null,
   room: null,
+  invite: null,
   queue: null,
   rematch: null,
   rooms: [],
@@ -251,6 +265,12 @@ let raceRetryTimer = null;
 let lobbyTries = 0;
 let lobbyRetryTimer = null;
 let pendingPlay = "";
+let joinLock = false;
+let inviteTimer = null;
+let inviteEpoch = 0;
+let invitePaint = "";
+let skippedRoom = "";
+let skippedRoomUntil = 0;
 let meEpoch = 0;
 let toastTimer = null;
 let holdDelay = null;
@@ -346,7 +366,7 @@ function shellName() {
     phase: state.phase,
     lobbyOpen: state.lobbyStatus === "open",
     solo: Boolean(state.localPractice),
-    view: state.route === "stats" ? "stats" : state.route === "ladder" ? "ladder" : "",
+    view: state.invite ? "invite" : state.route === "stats" ? "stats" : state.route === "ladder" ? "ladder" : "",
   });
 }
 
@@ -416,11 +436,13 @@ function modeElo() {
 function ensure() {
   setPageTitle();
   const next = shellName();
-  const entered = next !== state.shell;
+  const inviteKey = state.invite ? `${state.invite.status}:${state.invite.code || ""}` : "";
+  const entered = next !== state.shell || (next === "invite" && inviteKey !== invitePaint);
   if (entered) {
     state.shell = next;
     paintShell();
   }
+  invitePaint = next === "invite" ? inviteKey : "";
   paintDynamic();
   renderAccount();
   renderSide();
@@ -447,6 +469,11 @@ function paintShell() {
   else if (state.shell === "lobby") stage.append(lobbyView());
   else if (state.shell === "queue") stage.append(queueView());
   else if (state.shell === "room") stage.append(roomView());
+  else if (state.shell === "invite") {
+    const view = inviteView();
+    stage.append(view);
+    view.querySelector(".btn.primary, .btn")?.focus();
+  }
   else if (state.shell === "browse") stage.append(browseView());
   else if (state.shell === "race") stage.append(raceView());
   else if (state.shell === "results") stage.append(resultsView());
@@ -497,33 +524,8 @@ function authView() {
   box.append(actions);
   appendVersus(box, h, versusControls());
   if (state.config.devLogin) {
-    const form = h("form", { class: "dev" });
-    const input = h("input", { id: "dev-name", maxlength: "24", placeholder: "Local racer name", required: true });
-    form.append(
-      input,
-      h("button", { class: "btn", type: "submit", text: "Enter local track" }),
-    );
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        const data = await api("/auth/dev", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: input.value }),
-        });
-        state.me = data.user;
-        state.session = data.user ? "in" : "out";
-        clearRetry("me");
-        await Promise.allSettled([pullBoard(), pullRecent()]);
-        ensure();
-        pullDaily();
-        resumeRace();
-      } catch (error) {
-        toast(error.message === "name" ? "Use 2-24 letters for the local name." : "Could not open a local account.");
-      }
-    });
     box.append(h("p", { class: "hint", text: "Local accounts stay on this machine. Sign in with Fluxer on the public site." }));
-    box.append(form);
+    box.append(devLoginForm());
   }
   if (state.config && !state.config.oauth && !state.config.devLogin) {
     box.append(h("p", { class: "hint", text: "Add the Fluxer client id and secret, then reload." }));
@@ -563,12 +565,10 @@ function lobbyView() {
   appendVersus(box, h, versusControls());
   const join = h("form", { class: "join" });
   const code = h("input", { id: "room-code", maxlength: "4", placeholder: "Room code", "aria-label": "Room code" });
-  const params = new URLSearchParams(location.search);
-  if (params.get("room")) code.value = params.get("room").toUpperCase();
   join.append(code, h("button", { class: "btn", type: "submit", text: "Join room" }));
   join.addEventListener("submit", (event) => {
     event.preventDefault();
-    sendLobby({ t: "room_join", code: code.value });
+    requestRoomJoin(code.value);
   });
   box.append(join);
   return box;
@@ -606,7 +606,9 @@ function roomView() {
   const box = h("div", {});
   box.append(h("h2", { class: "lead", text: "Room" }));
   box.append(h("div", { class: "code", id: "room-code-label", text: room?.code || "" }));
+  box.append(h("p", { id: "room-count", class: "muted", text: roomOccupancy(room?.players?.length || 0, room?.max || state.roomMax) }));
   box.append(h("p", { id: "room-meta", class: "muted", text: `${settingLine(room?.mode || state.mode, room?.length || state.length, room?.format, room?.durationMs)}. No rating change. Listed in Open rooms until the host starts.` }));
+  mountRoomShare(box, h, room, { origin: location.origin, announce });
   const list = h("ul", { class: "room-list", id: "room-players" });
   box.append(list);
   const actions = h("div", { class: "actions" });
@@ -620,20 +622,6 @@ function roomView() {
   } else {
     actions.append(h("p", { class: "hint", text: "Waiting for the host to start." }));
   }
-  actions.append(h("button", {
-    class: "btn ghost",
-    type: "button",
-    text: "Copy link",
-    onclick: async () => {
-      const link = `${location.origin}/?room=${room?.code || ""}`;
-      try {
-        await navigator.clipboard.writeText(link);
-        toast("Link copied.");
-      } catch {
-        toast(link);
-      }
-    },
-  }));
   actions.append(h("button", {
     class: "btn",
     type: "button",
@@ -709,7 +697,7 @@ function paintRooms() {
       text: full ? "Full" : "Join",
       disabled: full,
       "data-code": room.code,
-      onclick: () => sendLobby({ t: "room_join", code: room.code }),
+      onclick: () => requestRoomJoin(room.code),
     }));
     root.append(card);
   }
@@ -1337,6 +1325,10 @@ function paintRoom() {
   const meta = document.getElementById("room-meta");
   if (meta && state.room) {
     meta.textContent = `${settingLine(state.room.mode || state.mode, state.room.length || state.length, state.room.format, state.room.durationMs)}. No rating change. Listed in Open rooms until the host starts.`;
+  }
+  const count = document.getElementById("room-count");
+  if (count && state.room) {
+    count.textContent = roomOccupancy(state.room.players?.length || 0, state.room.max || state.roomMax);
   }
   const list = document.getElementById("room-players");
   if (!list || !state.room) return;
@@ -2061,9 +2053,11 @@ function handleLobbyDown(sock, wasOpen) {
   } else if (!state.lobbyNotice || state.lobbyNotice.startsWith("restored")) {
     state.lobbyNotice = "reconnect";
   }
+  const inviteFailed = failSentInvite();
   state.lobbyStatus = "lost";
   releasePlay();
   ensure();
+  if (inviteFailed) announce(inviteMessage("failed"));
   scheduleLobbyRetry();
 }
 
@@ -2135,7 +2129,13 @@ function sendLobby(payload) {
   if (sock.readyState === WebSocket.CONNECTING) {
     sock.addEventListener("open", () => {
       if (sock !== lobby) return;
-      if (!deliver()) releasePlay();
+      if (!deliver()) {
+        releasePlay();
+        if (failSentInvite()) {
+          ensure();
+          announce(inviteMessage("failed"));
+        }
+      }
     }, { once: true });
     return true;
   }
@@ -2162,6 +2162,7 @@ function beginPlay(kind, payload) {
 function releasePlay() {
   state.playLock = false;
   pendingPlay = "";
+  joinLock = false;
   paintPlayButtons();
 }
 
@@ -2174,6 +2175,22 @@ function onLobby(event) {
     return;
   }
   if (msg.t === "error") {
+    if (state.invite?.status === "canceling") {
+      state.invite = null;
+      releasePlay();
+      state.phase = "lobby";
+      ensure();
+      return;
+    }
+    if (state.invite && (state.invite.status === "joining" || state.invite.status === "hold")) {
+      const code = state.invite.code || "";
+      const status = msg.reason ? inviteStatusForReason(msg.reason) : inviteStatusFromText(msg.error);
+      state.invite = { status, code };
+      releasePlay();
+      ensure();
+      announce(inviteMessage(status));
+      return;
+    }
     toast(msg.error || "Something went wrong.");
     if (pendingPlay === "queue" && state.phase === "queue") {
       state.phase = "lobby";
@@ -2195,14 +2212,28 @@ function onLobby(event) {
   }
   if (msg.t === "room") {
     releasePlay();
+    if (state.invite?.status === "canceling" || takeSkippedRoom(msg.code)) {
+      state.invite = null;
+      sendLobby({ t: "leave" });
+      state.phase = "lobby";
+      state.room = null;
+      ensure();
+      return;
+    }
+    clearTimeout(inviteTimer);
+    inviteTimer = null;
+    state.invite = null;
+    clearPendingRoom(safeStorage());
     state.lobbyNotice = "";
     state.room = msg;
+    if (msg.max) state.roomMax = msg.max;
     state.mode = msg.mode || state.mode;
     if (msg.length) state.length = msg.length;
     state.phase = "room";
-    const url = new URL(location.href);
-    url.searchParams.set("room", msg.code);
-    history.replaceState({}, "", url);
+    const cleaned = addressWithoutRoom(location.href);
+    if (`${location.pathname}${location.search}${location.hash}` !== cleaned) {
+      history.replaceState({}, "", cleaned);
+    }
     ensure();
     return;
   }
@@ -2761,9 +2792,15 @@ function applyMe(result) {
     state.me = result.data.user;
     clearRetry("me");
     if (previous !== "in") pullRecent();
+    settleInvite();
     return;
   }
   if (kind === "out") {
+    const inflight = state.invite?.status;
+    if (inflight === "joining" || inflight === "canceling" || inflight === "busy") {
+      const code = normalizeRoomCode(state.invite.code);
+      state.invite = code ? { status: "prompt", code } : null;
+    }
     if (previous === "in") dropLocalSession();
     else {
       state.session = "out";
@@ -2772,6 +2809,7 @@ function applyMe(result) {
       state.recentError = "";
       clearRetry("me");
     }
+    settleInvite();
     return;
   }
   if (previous === "unknown" || previous === "error") {
@@ -2860,6 +2898,9 @@ async function refreshProfile() {
 function dropLocalSession() {
   meEpoch += 1;
   clearRetry("me");
+  inviteEpoch += 1;
+  clearTimeout(inviteTimer);
+  inviteTimer = null;
   clearResume();
   state.forfeitedLocally = true;
   stopRaceRetry();
@@ -3719,6 +3760,258 @@ function syncLadderHash() {
   return true;
 }
 
+function safeStorage() {
+  try {
+    return sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function devLoginForm() {
+  const form = h("form", { class: "dev" });
+  const input = h("input", { id: "dev-name", maxlength: "24", placeholder: "Local racer name", required: true });
+  form.append(
+    input,
+    h("button", { class: "btn", type: "submit", text: "Enter local track" }),
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api("/auth/dev", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: input.value }),
+      });
+      await finishDevLogin(data);
+    } catch (error) {
+      toast(error.message === "name" ? "Use 2-24 letters for the local name." : "Could not open a local account.");
+    }
+  });
+  return form;
+}
+
+async function finishDevLogin(data) {
+  state.me = data.user;
+  state.session = data.user ? "in" : "out";
+  clearRetry("me");
+  await Promise.allSettled([pullBoard(), pullRecent()]);
+  settleInvite();
+  ensure();
+  pullDaily();
+  if (state.session === "in" && !state.invite) resumeRace();
+}
+
+function inviteView() {
+  return renderInvite(h, {
+    status: state.invite?.status || "failed",
+    code: state.invite?.code || "",
+    oauth: Boolean(state.config?.oauth),
+    renderDev: (parent) => {
+      if (!state.config?.devLogin) return;
+      parent.append(h("p", { class: "hint", text: "Local accounts stay on this machine. Sign in with Fluxer on the public site." }));
+      parent.append(devLoginForm());
+    },
+    onSignIn: () => {
+      const saved = savePendingRoom(safeStorage(), state.invite?.code, Date.now());
+      if (!saved) {
+        toast("This browser did not keep the room code. Copy it, then sign in.");
+        return false;
+      }
+      return true;
+    },
+    onCancel: cancelInviteJoin,
+    onLeaveRace: leaveRaceForInvite,
+    onStay: stayInRace,
+    onLobby: dismissInvite,
+  });
+}
+
+function inviteStatusFromText(error) {
+  const text = String(error || "");
+  if (/full/i.test(text)) return "full";
+  if (/not open/i.test(text)) return "closed";
+  if (/4 character/i.test(text)) return "invalid";
+  if (/wait a moment/i.test(text)) return "limit";
+  return "failed";
+}
+
+function captureRoomQuery() {
+  const parsed = parseRoomSearch(location.search);
+  if (!parsed.present) return;
+  const next = addressWithoutRoom(location.href);
+  if (`${location.pathname}${location.search}${location.hash}` !== next) {
+    history.replaceState({}, "", next);
+  }
+  if (!parsed.code) {
+    clearPendingRoom(safeStorage());
+    state.invite = { status: "invalid", code: "" };
+    announce(inviteMessage("invalid"));
+    return;
+  }
+  savePendingRoom(safeStorage(), parsed.code, Date.now());
+  state.invite = { status: "hold", code: parsed.code };
+}
+
+function settleInvite() {
+  const status = state.invite?.status;
+  if (status === "joining" || status === "busy" || status === "full" || status === "closed" || status === "invalid" || status === "limit" || status === "failed" || status === "canceling") {
+    return;
+  }
+  let code = normalizeRoomCode(state.invite?.code || "");
+  if (!code) {
+    code = readPendingRoom(safeStorage(), Date.now());
+    if (!code) {
+      if (status === "hold" || status === "prompt") state.invite = null;
+      else clearPendingRoom(safeStorage());
+      return;
+    }
+  }
+  const decision = joinDecision({
+    session: state.session,
+    code,
+    inRace: state.session === "in" && Boolean(safeStorage()?.getItem("tg_race")),
+  });
+  if (decision.action === "wait") return;
+  if (decision.action === "invalid") {
+    clearPendingRoom(safeStorage());
+    state.invite = { status: "invalid", code: "" };
+    announce(inviteMessage("invalid"));
+    return;
+  }
+  if (decision.action === "prompt") {
+    state.invite = { status: "prompt", code: decision.code };
+    return;
+  }
+  if (decision.action === "busy") {
+    state.invite = { status: "busy", code: decision.code };
+    return;
+  }
+  clearPendingRoom(safeStorage());
+  startInviteJoin(decision.code);
+}
+
+function startInviteJoin(code) {
+  const normalized = normalizeRoomCode(code);
+  if (!normalized) {
+    state.invite = { status: "invalid", code: "" };
+    announce(inviteMessage("invalid"));
+    ensure();
+    return;
+  }
+  const epoch = ++inviteEpoch;
+  clearTimeout(inviteTimer);
+  clearSkippedRoom();
+  state.invite = { status: "joining", code: normalized, sent: false };
+  announce(`Joining room ${normalized}...`);
+  ensure();
+  inviteTimer = setTimeout(() => {
+    inviteTimer = null;
+    if (epoch !== inviteEpoch) return;
+    if (state.invite?.status !== "joining" || state.invite.code !== normalized) return;
+    state.invite.sent = true;
+    joinLock = true;
+    if (!sendLobby({ t: "room_join", code: normalized })) {
+      joinLock = false;
+      state.invite = { status: "failed", code: normalized };
+      ensure();
+      announce(inviteMessage("failed"));
+    }
+  }, JOIN_PAUSE_MS);
+}
+
+function skipRoomSnapshot(code) {
+  skippedRoom = normalizeRoomCode(code);
+  skippedRoomUntil = Date.now() + 8000;
+}
+
+function takeSkippedRoom(code) {
+  const normalized = normalizeRoomCode(code);
+  if (!skippedRoom || !normalized || normalized !== skippedRoom) return false;
+  if (Date.now() > skippedRoomUntil) {
+    skippedRoom = "";
+    return false;
+  }
+  skippedRoom = "";
+  return true;
+}
+
+function clearSkippedRoom() {
+  skippedRoom = "";
+  skippedRoomUntil = 0;
+}
+
+function cancelInviteJoin() {
+  const sent = Boolean(state.invite?.sent);
+  const code = state.invite?.code || "";
+  inviteEpoch += 1;
+  clearTimeout(inviteTimer);
+  inviteTimer = null;
+  clearPendingRoom(safeStorage());
+  state.invite = null;
+  state.phase = "lobby";
+  if (sent) {
+    skipRoomSnapshot(code);
+    sendLobby({ t: "leave" });
+  }
+  ensure();
+}
+
+function dismissInvite() {
+  inviteEpoch += 1;
+  clearTimeout(inviteTimer);
+  inviteTimer = null;
+  clearPendingRoom(safeStorage());
+  state.invite = null;
+  state.phase = "lobby";
+  ensure();
+}
+
+function failSentInvite() {
+  if (state.invite?.status !== "joining" || !state.invite.sent) return false;
+  inviteEpoch += 1;
+  clearTimeout(inviteTimer);
+  inviteTimer = null;
+  state.invite = { status: "failed", code: state.invite.code || "" };
+  return true;
+}
+
+function leaveRaceForInvite() {
+  const code = state.invite?.code || "";
+  try { sessionStorage.removeItem("tg_race"); } catch { /* already blocked */ }
+  releaseRaceSocket();
+  state.phase = "lobby";
+  state.raceId = null;
+  state.results = null;
+  clearPendingRoom(safeStorage());
+  startInviteJoin(code);
+}
+
+function stayInRace() {
+  inviteEpoch += 1;
+  clearTimeout(inviteTimer);
+  inviteTimer = null;
+  clearPendingRoom(safeStorage());
+  state.invite = null;
+  ensure();
+  resumeRace();
+}
+
+function requestRoomJoin(raw) {
+  const code = normalizeRoomCode(raw);
+  if (!code) {
+    toast("Room codes are 4 characters.");
+    return;
+  }
+  if (joinLock) return;
+  clearSkippedRoom();
+  joinLock = true;
+  if (!sendLobby({ t: "room_join", code })) {
+    joinLock = false;
+    toast("The lobby is not connected.");
+  }
+}
+
 async function boot() {
   const params = new URLSearchParams(location.search);
   if (params.get("auth_error")) {
@@ -3727,6 +4020,7 @@ async function boot() {
     const next = params.toString();
     history.replaceState({}, "", next ? `/?${next}` : "/");
   }
+  captureRoomQuery();
   if (!MODES[state.mode]) state.mode = "desktop";
   ensureNetBanner();
   try {
@@ -3735,17 +4029,23 @@ async function boot() {
       syncLadderHash();
       await pullLadder();
     }
+    settleInvite();
     ensure();
-    if (state.session === "in" && params.get("room") && !sessionStorage.getItem("tg_race")) {
-      sendLobby({ t: "room_join", code: params.get("room") });
-    }
-    if (state.session === "in") resumeRace();
+    if (state.session === "in" && !state.invite) resumeRace();
   } catch (error) {
     console.error(error);
     if (state.session === "unknown") state.session = "error";
     ensure();
   }
 }
+
+window.addEventListener("popstate", () => {
+  const parsed = parseRoomSearch(location.search);
+  if (!parsed.present) return;
+  captureRoomQuery();
+  settleInvite();
+  ensure();
+});
 
 window.addEventListener("hashchange", () => {
   const parsed = routeFromHash(location.hash);

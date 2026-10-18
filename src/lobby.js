@@ -12,9 +12,15 @@ import { REMATCH_TTL_MS, rematchExpired } from "./retention.js";
 import { pickPassageRecord, rememberIds, unionAvoid } from "./sentences.js";
 import { freshSeed, timedPool } from "./timed-race.js";
 import { openStream } from "./timed.js";
+import {
+  ROOM_ALPHABET,
+  classifyRoomJoin,
+  joinBlocked,
+  normalizeRoomCode,
+  noteJoinFailure,
+} from "./room-code.js";
 
 const GATHER_MS = 1500;
-const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const ROOM_LIMIT = 6;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -71,6 +77,27 @@ function roomCode() {
   return code;
 }
 
+function clientIp(request) {
+  const direct = request.headers.get("cf-connecting-ip");
+  const forwarded = request.headers.get("x-forwarded-for");
+  const raw = direct || (forwarded ? forwarded.split(",")[0] : "");
+  return String(raw || "").trim().slice(0, 64);
+}
+
+function joinKeys(att) {
+  const keys = [];
+  if (att?.user?.id) keys.push(`user:${att.user.id}`);
+  if (att?.ip) keys.push(`ip:${att.ip}`);
+  return keys;
+}
+
+function roomJoinError(reason) {
+  if (reason === "room_full") return { t: "error", error: "That room is full.", reason };
+  if (reason === "room_closed") return { t: "error", error: "That room is not open.", reason };
+  if (reason === "room_limit") return { t: "error", error: "Wait a moment, then try that code again.", reason };
+  return { t: "error", error: "Room codes are 4 characters.", reason: "room_invalid" };
+}
+
 export class Lobby {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -80,6 +107,7 @@ export class Lobby {
     this.rematchDue = null;
     this.pending = Object.create(null);
     this.recentPassageIds = new Map();
+    this.joinFails = new Map();
   }
 
   avoidFor(live) {
@@ -242,6 +270,7 @@ export class Lobby {
           durationMs: Number(entry.att.durationMs) || 0,
           youHost: Boolean(entry.att.host),
           players,
+          max: ROOM_LIMIT,
         });
       }
     }
@@ -271,7 +300,15 @@ export class Lobby {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ status: "idle", user: player, mode: null, length: "sprint", room: null, host: false });
+    server.serializeAttachment({
+      status: "idle",
+      user: player,
+      mode: null,
+      length: "sprint",
+      room: null,
+      host: false,
+      ip: clientIp(request),
+    });
     server.send(JSON.stringify({ t: "hello", you: player, serverNow: Date.now() }));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -420,13 +457,34 @@ export class Lobby {
     }
 
     if (msg.t === "room_join") {
-      const code = String(msg.code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-      if (code.length !== 4) return this.send(ws, { t: "error", error: "Room codes are 4 characters." });
-      const members = this.roomMembers(code);
-      if (!members.length) return this.send(ws, { t: "error", error: "That room is not open." });
-      if (members.length >= ROOM_LIMIT) return this.send(ws, { t: "error", error: "That room is full." });
+      const now = Date.now();
+      const keys = joinKeys(att);
+      if (joinBlocked(this.joinFails, keys, now)) {
+        return this.send(ws, roomJoinError("room_limit"));
+      }
+      const requested = normalizeRoomCode(msg.code);
+      if (requested && att.status === "room" && att.room === requested) {
+        this.emitRoom(requested);
+        return;
+      }
+      const members = requested ? this.roomMembers(requested) : [];
+      const verdict = classifyRoomJoin(msg.code, members.length, ROOM_LIMIT);
+      if (!verdict.ok) {
+        noteJoinFailure(this.joinFails, keys, now);
+        return this.send(ws, roomJoinError(verdict.reason));
+      }
+      const code = verdict.code;
       await this.releaseGroup(ws, att);
-      const host = members.find((entry) => entry.att.host) || members[0];
+      const seated = this.roomMembers(code);
+      if (!seated.length) {
+        noteJoinFailure(this.joinFails, keys, Date.now());
+        return this.send(ws, roomJoinError("room_closed"));
+      }
+      if (seated.length >= ROOM_LIMIT) {
+        noteJoinFailure(this.joinFails, keys, Date.now());
+        return this.send(ws, roomJoinError("room_full"));
+      }
+      const host = seated.find((entry) => entry.att.host) || seated[0];
       const previousRoom = att.status === "room" ? att.room : null;
       att.status = "room";
       att.mode = host.att.mode;
