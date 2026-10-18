@@ -46,6 +46,10 @@ test("a run with a bad ladder, length, or clock is dropped", () => {
   assert.equal(kept.ranked, false);
   assert.equal(kept.source, "local");
   assert.equal(kept.errors, 0);
+  assert.equal(kept.opponent, "");
+  assert.equal(normalizeRun(run({ opponent: "bot" })).opponent, "bot");
+  assert.equal(normalizeRun(run({ opponent: "ghost" })).opponent, "ghost");
+  assert.equal(normalizeRun(run({ opponent: "cpu" })).opponent, "");
 });
 
 test("history keeps the newest 200 runs and rejects a bad payload", () => {
@@ -127,6 +131,13 @@ test("recent labels name the ladder and hide a practice place", () => {
   const dnf = recentLabel({ mode: "desktop", length: "long", label: "rated", place: 1, ms: null, wpm: 0 });
   assert.equal(dnf.startsWith("DNF"), true);
   assert.equal(dnf.includes("#"), false);
+  const bot = recentLabel(run({ opponent: "bot", place: 1 }));
+  assert.equal(bot.includes("#"), false);
+  assert.equal(bot.includes("Practice vs bot"), true);
+  const ghost = recentLabel(run({ opponent: "ghost", place: 2, mode: "cursor", length: "long" }));
+  assert.equal(ghost.includes("#"), false);
+  assert.equal(ghost.includes("Practice vs ghost"), true);
+  assert.equal(ghost.includes("Cursor"), true);
   assert.equal(formatRunDate(Date.UTC(2026, 9, 17)), "17 Oct 2026");
   assert.equal(formatRunDate("nope"), "");
 });

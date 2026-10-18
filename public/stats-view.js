@@ -4,6 +4,7 @@ import {
   LENGTH_NAMES,
   displayStanding,
   excerpt,
+  practiceTitle,
   formatRunDate,
   historyExport,
   ladderName,
@@ -51,7 +52,8 @@ function recentRows(h, model) {
     row.append(cell(h, "Date", formatRunDate(run.at)));
     row.append(cell(h, "Ladder", ladderName(run.mode) || run.mode || ""));
     row.append(cell(h, "Length", lengthName(run.length)));
-    row.append(cell(h, "Kind", displayStanding(run)));
+    const standing = displayStanding(run);
+    row.append(cell(h, "Kind", standing === "Practice" ? practiceTitle(run) : standing));
     row.append(cell(h, "WPM", Number(run.wpm).toFixed(1)));
     row.append(cell(h, "Accuracy", `${Number(run.accuracy)}%`));
     body.append(row);

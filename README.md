@@ -27,6 +27,8 @@ This is a small friendly race. Finish order is the order the server hears a comp
 
 Passages are original prose. Desktop and Mobile share one pool. Cursor passages use only the characters on the on-screen keys. A visitor can practice without an account. Those runs stay in the browser. Ranked races still come from the server.
 
+From the home screen, Race a bot runs a seeded opponent at a chosen pace, and Race your ghost replays your best finish for that ladder and length. Both are practice. They stay in this browser and do not change Elo or the leaderboard. The ranked queue still pairs two people.
+
 ## Local play
 
 Wrangler 4 needs Node.js 22 or newer.

@@ -16,6 +16,7 @@ import {
   buildStatsModel,
   displayStanding,
   loadHistory,
+  practiceTitle,
   recentLabel,
   saveHistory,
   serverRaceRow,
@@ -23,6 +24,20 @@ import {
 import { soloFinish, soloStart } from "./solo.js";
 import { renderSoloResults } from "./solo-view.js";
 import { renderStats } from "./stats-view.js";
+import { BOT_PRESETS, BOT_WPM_MAX, BOT_WPM_MIN, clampBotWpm } from "./bot.js";
+import {
+  considerGhost,
+  finishTrace,
+  ghostFor,
+  ghostHint,
+  loadGhosts,
+  noteSample,
+  progressAt,
+  saveGhosts,
+  scaleGhost,
+} from "./ghost.js";
+import { botOpponent, compareRace, ghostOpponent } from "./versus.js";
+import { appendVersus, renderVersusResults } from "./versus-view.js";
 import {
   LOBBY_RETRY_BASE_MS,
   LOBBY_RETRY_CAP_MS,
@@ -130,6 +145,10 @@ const state = {
   soloSaved: false,
   passageId: "",
   soloRun: null,
+  versus: null,
+  trace: [],
+  botWpm: 55,
+  ghosts: loadGhosts(),
   localRuns: loadHistory(),
   route: typeof location !== "undefined" && location.hash === "#/stats" ? "stats" : "",
   clearConfirm: false,
@@ -336,7 +355,11 @@ function paintShell() {
   else if (state.shell === "browse") stage.append(browseView());
   else if (state.shell === "race") stage.append(raceView());
   else if (state.shell === "results") stage.append(resultsView());
-  else if (state.shell === "solo-results") stage.append(soloResultsView());
+  else if (state.shell === "solo-results") {
+    const view = soloResultsView();
+    stage.append(view);
+    view.querySelector("[data-action='race-again']")?.focus();
+  }
   else if (state.shell === "stats") stage.append(h("div", { id: "stats-root", class: "stats-page" }));
 }
 
@@ -374,6 +397,7 @@ function authView() {
     actions.append(h("a", { class: "btn", href: "/auth/login", text: "Sign in with Fluxer" }));
   }
   box.append(actions);
+  appendVersus(box, h, versusControls());
   if (state.config.devLogin) {
     const form = h("form", { class: "dev" });
     const input = h("input", { id: "dev-name", maxlength: "24", placeholder: "Local racer name", required: true });
@@ -436,6 +460,7 @@ function lobbyView() {
     h("button", { class: "btn", type: "button", "data-action": "browse", text: "Open rooms", onclick: openBrowse }),
   );
   box.append(actions);
+  appendVersus(box, h, versusControls());
   const join = h("form", { class: "join" });
   const code = h("input", { id: "room-code", maxlength: "4", placeholder: "Room code", "aria-label": "Room code" });
   const params = new URLSearchParams(location.search);
@@ -953,6 +978,9 @@ function raceStandingWord() {
 }
 
 function racePillText() {
+  if (state.versus?.kind === "bot" || state.versus?.kind === "ghost") {
+    return practiceTitle({ opponent: state.versus.kind });
+  }
   const word = raceStandingWord();
   return displayStanding({
     ranked: word === "rated",
@@ -987,6 +1015,7 @@ function paintDynamic() {
   if (state.shell === "lobby" || state.shell === "auth") {
     paintModes();
     paintLengths();
+    paintVersus();
   }
   if (state.shell === "stats") paintStatsPage();
   if (state.shell === "queue") {
@@ -1452,6 +1481,7 @@ function localLane() {
   mine.i = correctLength(state.typed, state.sentence);
   mine.wpm = currentWpm();
   if (state.phase === "finishing") mine.finishedAt = mine.finishedAt || serverNow();
+  noteHumanTrace();
   paintLanes();
 }
 
@@ -1528,7 +1558,7 @@ function paintLanes() {
   const racing = state.shell === "race" || state.shell === "results";
   root.replaceChildren();
   if (!racing) return;
-  root.append(h("h2", { text: "Room" }));
+  root.append(h("h2", { text: state.versus ? "Practice" : "Room" }));
   const total = Math.max(1, state.sentence.length);
   const rows = state.players.map((player) => {
     const live = state.live.find((row) => row.id === player.id) || { i: 0, wpm: 0, finishedAt: null };
@@ -1566,6 +1596,7 @@ function chooseMode(mode) {
   state.mode = mode;
   rememberPreference("tg_mode", mode);
   paintModes();
+  paintVersus();
   pullBoard();
 }
 
@@ -1575,6 +1606,7 @@ function chooseLength(length) {
   state.length = length;
   rememberPreference("tg_length", length);
   paintLengths();
+  paintVersus();
 }
 
 function socketUrl(raceId) {
@@ -2067,6 +2099,8 @@ function exitToLobby() {
   state.soloSaved = false;
   state.passageId = "";
   state.soloRun = null;
+  state.versus = null;
+  state.trace = [];
   state.phase = "lobby";
   state.results = null;
   state.sentence = "";
@@ -2272,6 +2306,7 @@ setInterval(() => {
     count.hidden = true;
     beginRace();
   }
+  tickVersus();
   paintStats();
 }, 80);
 
@@ -2468,6 +2503,8 @@ function dropLocalSession() {
   state.soloSaved = false;
   state.passageId = "";
   state.soloRun = null;
+  state.versus = null;
+  state.trace = [];
   state.phase = "lobby";
   state.results = null;
   state.players = [];
@@ -2491,10 +2528,62 @@ function sideRecent() {
   return buildStatsModel({ local: state.localRuns, server, passageIdForText }).recent.slice(0, 8);
 }
 
-function beginSolo(options = {}) {
+function versusControls() {
+  const ghost = ghostFor(state.ghosts, state.mode, state.length);
+  const wpm = clampBotWpm(state.botWpm);
+  return {
+    wpm,
+    min: BOT_WPM_MIN,
+    max: BOT_WPM_MAX,
+    presets: BOT_PRESETS,
+    ghostReady: Boolean(ghost),
+    ghostHint: ghostHint(state.mode, state.length, ghost),
+    onPreset: setBotWpm,
+    onWpm: setBotWpm,
+    onBot: () => beginVersus({ kind: "bot" }),
+    onGhost: () => beginVersus({ kind: "ghost" }),
+  };
+}
+
+function setBotWpm(value) {
+  state.botWpm = clampBotWpm(value);
+  paintVersus();
+}
+
+function paintVersus() {
+  const wpm = clampBotWpm(state.botWpm);
+  const slider = document.getElementById("bot-wpm");
+  if (slider) {
+    if (slider.value !== String(wpm)) slider.value = String(wpm);
+    slider.setAttribute("aria-valuenow", String(wpm));
+    slider.setAttribute("aria-valuetext", `${wpm} WPM`);
+  }
+  const readout = document.getElementById("bot-wpm-value");
+  if (readout) readout.textContent = `${wpm} WPM`;
+  for (const button of document.querySelectorAll(".versus [data-preset]")) {
+    const on = Number(button.dataset.preset) === wpm;
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  const ghost = ghostFor(state.ghosts, state.mode, state.length);
+  const race = document.getElementById("race-ghost");
+  if (race) race.disabled = !ghost;
+  const hint = document.getElementById("ghost-hint");
+  if (hint) hint.textContent = ghostHint(state.mode, state.length, ghost);
+}
+
+function freshSeed() {
+  const buf = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    crypto.getRandomValues(buf);
+    return buf[0];
+  }
+  return Math.floor(Math.random() * 4294967296);
+}
+
+function soloPatch(options = {}) {
   const avoid = state.localRuns.slice(-RECENT_AVOID).map((run) => run.passageId).filter(Boolean);
   if (state.passageId) avoid.push(state.passageId);
-  const patch = soloStart({
+  return soloStart({
     mode: state.mode,
     length: state.length,
     me: state.me,
@@ -2503,11 +2592,24 @@ function beginSolo(options = {}) {
     passageId: options.passageId || (options.same ? state.passageId : ""),
     same: Boolean(options.same),
   });
+}
+
+function openLocalRace(patch, versus) {
   if (!patch.sentence) {
     toast("No passage is available for that ladder.");
-    return;
+    return false;
   }
   Object.assign(state, patch);
+  state.versus = versus || null;
+  state.trace = [{ t: 0, i: 0 }];
+  if (versus) {
+    const player = patch.players[0];
+    state.players = [player, { id: versus.id, name: versus.name }];
+    state.live = [
+      { id: player.id, i: 0, wpm: 0, finishedAt: null },
+      { id: versus.id, i: 0, wpm: 0, finishedAt: null },
+    ];
+  }
   state.shell = "";
   inputSession = emptyInputSession();
   lastLive = "";
@@ -2517,8 +2619,90 @@ function beginSolo(options = {}) {
   rememberPreference("tg_mode", state.mode);
   rememberPreference("tg_length", state.length);
   ensure();
-  announce("Go. Practice started.");
   focusCapture();
+  return true;
+}
+
+function beginSolo(options = {}) {
+  const patch = soloPatch(options);
+  if (!openLocalRace(patch, null)) return;
+  announce("Go. Practice started.");
+}
+
+function beginVersus(options = {}) {
+  const kind = options.kind === "ghost" ? "ghost" : "bot";
+  const previous = options.same && state.versus?.kind === kind ? state.versus : null;
+  const patch = soloPatch(options);
+  if (!patch.sentence) {
+    toast("No passage is available for that ladder.");
+    return;
+  }
+  let versus = null;
+  if (kind === "ghost") {
+    if (previous?.samples?.length) {
+      const from = previous.samples[previous.samples.length - 1].i || patch.sentence.length;
+      const samples = from === patch.sentence.length
+        ? previous.samples.map((sample) => ({ t: sample.t, i: sample.i }))
+        : scaleGhost(previous.samples, from, patch.sentence.length);
+      versus = { ...previous, samples, finishMs: samples[samples.length - 1].t };
+    } else {
+      versus = ghostOpponent({
+        sentence: patch.sentence,
+        best: ghostFor(state.ghosts, state.mode, state.length),
+      });
+    }
+    if (!versus) {
+      toast(ghostHint(state.mode, state.length, null));
+      return;
+    }
+  } else {
+    const target = previous ? previous.wpm : state.botWpm;
+    const seed = previous?.seed != null ? previous.seed : freshSeed();
+    versus = botOpponent({ sentence: patch.sentence, targetWpm: target, seed });
+  }
+  if (!openLocalRace(patch, versus)) return;
+  announce(kind === "ghost" ? "Go. Practice versus your ghost started." : "Go. Practice versus a bot started.");
+}
+
+function changeBot() {
+  exitToLobby();
+  document.getElementById("bot-wpm")?.focus();
+}
+
+function noteHumanTrace() {
+  if (!state.localPractice) return;
+  const elapsed = Math.max(0, serverNow() - state.startAt);
+  const index = correctLength(state.typed, state.sentence);
+  state.trace = noteSample(state.trace, elapsed, index);
+}
+
+function opponentRow() {
+  const id = state.versus?.id;
+  if (!id) return null;
+  return state.live.find((row) => row.id === id) || null;
+}
+
+function tickVersus() {
+  if (!state.localPractice || !state.versus || state.phase !== "race") return;
+  noteHumanTrace();
+  const row = opponentRow();
+  if (!row || row.finishedAt) return;
+  const length = state.sentence.length;
+  const elapsed = Math.max(0, serverNow() - state.startAt);
+  let index = progressAt(state.versus.samples, elapsed, length);
+  if (elapsed >= state.versus.finishMs) index = length;
+  if (index >= length && length > 0) {
+    row.i = length;
+    row.finishedAt = state.startAt + state.versus.finishMs;
+    row.wpm = wpm(length, Math.max(1, state.versus.finishMs));
+    paintLanes();
+    noteFinishes();
+    return;
+  }
+  if (row.i === index) return;
+  row.i = index;
+  row.wpm = wpm(index, Math.max(1, elapsed));
+  paintLanes();
 }
 
 function finishSolo() {
@@ -2534,12 +2718,45 @@ function finishSolo() {
     length: state.length,
     passageId: state.passageId,
   });
+  run.opponent = state.versus?.kind === "bot" || state.versus?.kind === "ghost" ? state.versus.kind : "";
   state.soloRun = run;
   state.localRuns = appendRun(state.localRuns, run);
   if (!saveHistory(state.localRuns)) toast("This browser did not save the practice run.");
+  const samples = finishTrace(state.trace, run.ms, state.sentence.length);
+  const next = considerGhost(state.ghosts, {
+    mode: run.mode,
+    length: run.length,
+    wpm: run.wpm,
+    accuracy: run.accuracy,
+    ms: run.ms,
+    chars: state.sentence.length,
+    passageId: state.passageId,
+    samples,
+  });
+  if (next.kept) {
+    state.ghosts = next.bests;
+    if (!saveGhosts(state.ghosts)) toast("This browser did not save the ghost.");
+  }
   state.phase = "results";
   state.shell = "";
   ensure();
+}
+
+function versusOutcome() {
+  const run = state.soloRun;
+  const opp = state.versus;
+  if (!run || !opp) return null;
+  const length = state.sentence.length;
+  return compareRace({
+    youFinished: true,
+    youMs: run.ms,
+    youIndex: length,
+    oppFinished: true,
+    oppMs: opp.finishMs,
+    oppIndex: length,
+    length,
+    opponent: opp.kind === "ghost" ? "Your ghost" : "Bot",
+  });
 }
 
 function announceSolo() {
@@ -2549,12 +2766,39 @@ function announceSolo() {
     return;
   }
   const seconds = (Number(run.ms) / 1000).toFixed(1);
-  announce(`Practice finished. ${Number(run.wpm).toFixed(1)} words per minute, ${run.accuracy}% accuracy, ${seconds} seconds, ${run.errors} errors.`);
+  const detail = `${Number(run.wpm).toFixed(1)} words per minute, ${run.accuracy}% accuracy, ${seconds} seconds, ${run.errors} errors.`;
+  if (!state.versus) {
+    announce(`Practice finished. ${detail}`);
+    return;
+  }
+  const outcome = versusOutcome();
+  const title = practiceTitle({ opponent: state.versus.kind });
+  announce(`${title}. ${outcome?.summary || ""} ${detail}`);
 }
 
 function soloResultsView() {
   const box = h("div", { class: "results" });
   const run = state.soloRun || {};
+  if (state.versus) {
+    const outcome = versusOutcome();
+    const length = state.sentence.length;
+    renderVersusResults(box, h, {
+      title: practiceTitle({ opponent: state.versus.kind }),
+      summary: outcome?.summary || "",
+      sentence: state.sentence,
+      wpm: run.wpm || 0,
+      accuracy: run.accuracy || 0,
+      ms: run.ms || 0,
+      errors: run.errors || 0,
+      oppWpm: wpm(length, Math.max(1, state.versus.finishMs || 0)),
+      oppMs: state.versus.finishMs || 0,
+      oppLabel: state.versus.kind === "ghost" ? "Ghost" : "Bot",
+      onAgain: () => beginVersus({ kind: state.versus.kind, same: true, seed: state.versus.seed }),
+      onChange: () => changeBot(),
+      onLobby: () => exitToLobby(),
+    });
+    return box;
+  }
   renderSoloResults(box, h, {
     sentence: state.sentence,
     wpm: run.wpm || 0,

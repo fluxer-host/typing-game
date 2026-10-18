@@ -39,6 +39,7 @@ export function normalizeRun(raw) {
     ms,
     errors: Number.isFinite(errors) && errors > 0 ? errors : 0,
     ranked: false,
+    opponent: raw.opponent === "bot" || raw.opponent === "ghost" ? raw.opponent : "",
     source: "local",
   };
 }
@@ -148,12 +149,24 @@ export function displayStanding(run) {
   return "Practice";
 }
 
-export function recentLabel(run) {
+export function practiceTitle(run) {
+  if (run?.opponent === "bot") return "Practice vs bot";
+  if (run?.opponent === "ghost") return "Practice vs ghost";
+  return "Practice";
+}
+
+export function runKind(run) {
   const standing = displayStanding(run);
+  if (standing === "Practice") return practiceTitle(run);
+  return standing;
+}
+
+export function recentLabel(run) {
+  const standing = runKind(run);
   const parts = [];
-  if (standing && standing !== "Practice") {
-    if (run.ms == null) parts.push("DNF");
-    else if (run.place != null) parts.push(`#${run.place}`);
+  if (standing === "Ranked" || standing === "Unranked") {
+    if (run?.ms == null) parts.push("DNF");
+    else if (run?.place != null) parts.push(`#${run.place}`);
   }
   parts.push(ladderName(run?.mode) || "Desktop");
   const length = lengthName(run?.length);
