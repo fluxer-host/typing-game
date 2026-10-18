@@ -137,13 +137,11 @@ export function boardEntry(user, mode, rank) {
   };
 }
 
-// Public ladder row. `avatarUrl` is already resolved. A custom avatar URL
-// contains the account id, so that URL is dropped before the response.
+// Public ladder row. `avatarUrl` is already resolved. A custom Fluxer picture
+// URL contains the account id in its path. The row still has no id field.
 export function shapeLadderRow(user, mode, rank) {
   const entry = boardEntry(user, mode, rank);
-  const id = user?.id == null ? "" : String(user.id);
-  let avatar = typeof user?.avatarUrl === "string" && user.avatarUrl ? user.avatarUrl : null;
-  if (avatar && id && avatar.includes(id)) avatar = null;
+  const avatar = typeof user?.avatarUrl === "string" && user.avatarUrl ? user.avatarUrl : null;
   const color = Number(user?.avatar_color ?? user?.color);
   return {
     rank: entry.rank,

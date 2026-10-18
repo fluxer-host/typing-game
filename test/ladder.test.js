@@ -174,7 +174,7 @@ test("the rank window stays inside the ladder", () => {
   assert.equal(winRate(5, 4), 1);
 });
 
-test("a public ladder row drops the account id and a custom avatar", () => {
+test("a public ladder row keeps a custom Fluxer picture and drops the account id field", () => {
   const hidden = shapeLadderRow({
     id: "user-secret",
     username: "ada",
@@ -187,10 +187,10 @@ test("a public ladder row drops the account id and a custom avatar", () => {
     elo_mobile: 1400,
   }, "desktop", 2);
   assert.deepEqual(Object.keys(hidden).sort(), ["avatar", "color", "name", "races", "rank", "rating", "wins"]);
-  assert.equal(hidden.avatar, null);
+  assert.equal(hidden.avatar, "https://fluxerusercontent.com/avatars/user-secret/abc.png");
+  assert.equal("id" in hidden, false);
   assert.equal(hidden.rank, 2);
   assert.equal(hidden.rating, 1100);
-  assert.equal(JSON.stringify(hidden).includes("user-secret"), false);
   assert.equal(JSON.stringify(hidden).includes("1400"), false);
   const shown = shapeLadderRow({
     id: "9100001",
@@ -426,13 +426,15 @@ test("paged elo rows stay stable across ties", async () => {
   const mine = await signed.json();
   assert.equal(mine.you.rank, 27);
   assert.equal(mine.you.self, true);
-  assert.equal(mine.you.avatar, null);
+  assert.equal(mine.you.avatar, "https://fluxerusercontent.com/avatars/user-secret/abc123.png");
+  assert.equal("id" in mine.you, false);
   assert.equal(mine.you.races, 4);
   assert.equal(mine.you.wins, 1);
   assert.deepEqual(mine.around.map((row) => row.rank), [25, 26, 27, 28, 29]);
   assert.equal(mine.around.find((row) => row.rank === 27).self, true);
+  assert.equal(mine.around.find((row) => row.rank === 27).avatar, mine.you.avatar);
   assert.equal(mine.around.filter((row) => row.self).length, 1);
-  const signedPacked = JSON.stringify(mine);
+  const signedPacked = JSON.stringify(mine).replaceAll(mine.you.avatar, "");
   for (const row of field) assert.equal(signedPacked.includes(row.id), false, row.id);
 
   const idleCookie = await sessionCookie(env, "unranked");
@@ -484,9 +486,11 @@ test("daily pages keep a tied finish on one page", async () => {
   const caller = { id: "secret-b", username: "secret-b", global_name: "Bea", avatar: "abc123" };
   const around = await loadDailyBoard(env, { ladder: "desktop", day, limit: 2, offset: 0, user: caller, now });
   assert.equal(around.you.rank, 3);
+  assert.equal(around.you.avatar, "https://fluxerusercontent.com/avatars/secret-b/abc123.png");
   assert.deepEqual(around.around.map((row) => row.rank), [1, 2, 3, 4, 5]);
   assert.equal(around.around.find((row) => row.rank === 3).self, true);
-  const packed = JSON.stringify(around);
+  assert.equal(around.around.find((row) => row.rank === 1).avatar, "https://fluxerusercontent.com/avatars/secret-c/abc123.png");
+  const packed = JSON.stringify(around).replace(/https:\/\/fluxerusercontent\.com\/avatars\/[^"\\]+/g, "");
   for (const row of rows) assert.equal(packed.includes(row.id), false, row.id);
   assert.equal(parseDailyQuery(query(""), now).offset, 0);
   assert.equal(parseDailyQuery(query("offset=10"), now).offset, 10);

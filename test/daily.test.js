@@ -434,9 +434,10 @@ test("the faster score ranks first and the board hides internal ids", async () =
   assert.equal(board.you.name, "Ada");
   assert.equal(board.you.rank, 2);
   const packed = JSON.stringify(board);
-  assert.equal(packed.includes("user-secret"), false);
+  assert.equal(board.rows[1].avatar, "https://fluxerusercontent.com/avatars/user-secret/abc123.png");
+  assert.equal(board.you.avatar, board.rows[1].avatar);
+  assert.equal(packed.replaceAll(board.rows[1].avatar, "").includes("user-secret"), false);
   assert.equal(packed.includes("4242424242"), false);
-  assert.equal(board.rows[1].avatar, null);
   assert.match(board.rows[0].avatar, /\/avatars\/[0-5]\.png$/);
   for (const row of [...board.rows, board.you]) {
     assert.equal("id" in row, false);
@@ -444,7 +445,7 @@ test("the faster score ranks first and the board hides internal ids", async () =
   }
 });
 
-test("a custom avatar url that contains the account id is omitted", () => {
+test("a custom Fluxer picture URL stays on the daily row without an id field", () => {
   const row = shapeDailyRow({
     id: "user-secret",
     name: "Ada",
@@ -456,7 +457,7 @@ test("a custom avatar url that contains the account id is omitted", () => {
     self: true,
     ms: 12000,
   });
-  assert.equal(row.avatar, null);
+  assert.equal(row.avatar, "https://fluxerusercontent.com/avatars/user-secret/abc123.png");
   assert.equal(row.name, "Ada");
   assert.equal(row.self, true);
   assert.equal("id" in row, false);

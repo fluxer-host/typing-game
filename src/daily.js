@@ -235,9 +235,7 @@ export function isUniqueViolation(error) {
 }
 
 export function shapeDailyRow(input) {
-  const id = input?.id == null ? "" : String(input.id);
-  let avatar = typeof input?.avatar === "string" && input.avatar ? input.avatar : null;
-  if (avatar && id && avatar.includes(id)) avatar = null;
+  const avatar = typeof input?.avatar === "string" && input.avatar ? input.avatar : null;
   const color = Number(input?.color);
   const row = {
     rank: Number(input?.rank) || 0,
