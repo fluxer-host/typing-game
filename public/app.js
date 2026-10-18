@@ -5,7 +5,14 @@ import {
   emptyInputSession,
   textUnits,
 } from "./input.js";
-import { accuracy, wpm } from "../src/score.js";
+import { wpm } from "../src/score.js";
+import {
+  LIVE_FIX_HINT,
+  emptyLiveTrack,
+  liveStatsModel,
+  officialResultNote,
+  stepLiveTrack,
+} from "./live-stats.js";
 import { lengthList } from "../src/lengths.js";
 import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
 import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
@@ -220,6 +227,8 @@ let refocusTries = 0;
 let inputGuardEpoch = 0;
 let composeEpoch = 0;
 let lastLive = "";
+let liveTrack = emptyLiveTrack();
+let livePace = null;
 let ladderEpoch = 0;
 let ladderPaintToken = "";
 let lastNote = "";
@@ -686,7 +695,19 @@ function raceView() {
   const top = h("div", { class: "race-top" });
   const raceLength = state.daily ? "Set" : (lengthInfo(state.length)?.title || "Sprint");
   top.append(h("span", { class: "pill", text: `${MODES[state.mode].title} · ${raceLength} · ${racePillText()}` }));
-  top.append(h("span", { class: "stats", id: "stats", text: "" }));
+  const stats = h("div", {
+    class: "live-stats",
+    id: "stats",
+    role: "group",
+    "aria-label": "Live pace",
+  });
+  for (const [label, id] of [["WPM", "live-wpm"], ["Accuracy", "live-acc"], ["Time", "live-time"]]) {
+    const cell = h("span", { class: "live-stat" });
+    cell.append(h("span", { class: "live-stat-label", text: label }));
+    cell.append(h("span", { class: "live-stat-value", id, text: "\u2014" }));
+    stats.append(cell);
+  }
+  top.append(stats);
   top.append(h("button", {
     id: "leave-race",
     class: "btn ghost",
@@ -717,6 +738,12 @@ function raceView() {
   }
   wrap.append(capture);
   box.append(wrap);
+  box.append(h("p", {
+    id: "fix-hint",
+    class: "fix-hint is-quiet",
+    "aria-hidden": "true",
+    text: LIVE_FIX_HINT,
+  }));
   const tap = h("button", {
     id: "tap-to-type",
     class: "btn tap-type",
@@ -874,6 +901,9 @@ function resultsView() {
   }
   if (!state.results?.cancelled) {
     box.append(h("p", { class: "quote", text: state.results?.sentence || state.sentence }));
+    const me = (state.results?.rows || []).find((row) => row.id === state.me?.id);
+    const note = me?.finished ? officialResultNote(livePace, me.wpm) : "";
+    if (note) box.append(h("p", { class: "hint official-note", text: note }));
     box.append(resultTable());
   }
   box.append(h("p", { id: "rematch-note", class: "hint rematch-note", hidden: true }));
@@ -1234,7 +1264,8 @@ function paintPassage() {
   box.classList.toggle("long", sentence.length > 160);
   box.replaceChildren();
   for (let i = 0; i < sentence.length; i += 1) {
-    const span = h("span", { class: characterClass(sentence, typed, i) });
+    const className = characterClass(sentence, typed, i);
+    const span = h("span", { class: className.includes("bad") ? `${className} blocked` : className });
     span.append(document.createTextNode(characterText(sentence, typed, i)));
     const miss = typedMiss(sentence, typed, i);
     if (miss) {
@@ -1249,9 +1280,36 @@ function paintPassage() {
 function paintStats() {
   const node = document.getElementById("stats");
   if (!node) return;
-  const elapsed = Math.max(0, serverNow() - state.startAt);
-  const clock = state.phase === "countdown" ? "ready" : `${(elapsed / 1000).toFixed(1)}s`;
-  node.textContent = `${currentWpm().toFixed(1)} wpm · ${accuracy(state.ok, state.err)}% · ${clock}`;
+  const elapsed = serverNow() - state.startAt;
+  const correct = correctLength(state.typed, state.sentence);
+  const started = state.phase === "race" || state.phase === "finishing";
+  if (started && elapsed >= 0) {
+    liveTrack = stepLiveTrack(liveTrack, { elapsedMs: elapsed, correctChars: correct });
+  }
+  const model = liveStatsModel({
+    elapsedMs: elapsed,
+    correctChars: correct,
+    ok: state.ok,
+    err: state.err,
+    typed: state.typed,
+    sentence: state.sentence,
+    track: liveTrack,
+    started,
+  });
+  if (model.wpmValue != null) livePace = model.wpmValue;
+  const wpmNode = document.getElementById("live-wpm");
+  const accNode = document.getElementById("live-acc");
+  const timeNode = document.getElementById("live-time");
+  if (wpmNode) wpmNode.textContent = model.wpmText;
+  if (accNode) accNode.textContent = model.accuracyText;
+  if (timeNode) timeNode.textContent = model.clockText;
+  const hint = document.getElementById("fix-hint");
+  if (hint) {
+    const show = Boolean(model.blocked);
+    hint.classList.toggle("is-quiet", !show);
+    if (show) hint.removeAttribute("aria-hidden");
+    else hint.setAttribute("aria-hidden", "true");
+  }
 }
 
 function paintLocked() {
@@ -1949,6 +2007,8 @@ function startMatch(msg) {
   stopRaceRetry();
   releasePlay();
   state.phase = serverNow() < state.startAt ? "countdown" : "race";
+  liveTrack = emptyLiveTrack();
+  livePace = null;
   lastLive = "";
   lastNote = "";
   heardLock = false;
@@ -2683,6 +2743,8 @@ function openLocalRace(patch, versus) {
   }
   state.shell = "";
   inputSession = emptyInputSession();
+  liveTrack = emptyLiveTrack();
+  livePace = null;
   lastLive = "";
   lastNote = "";
   heardLock = false;
@@ -2946,6 +3008,7 @@ function dailyResultView() {
     wpm: numbers.wpm,
     accuracy: numbers.accuracy,
     ms: numbers.ms,
+    officialNote: officialResultNote(livePace, numbers.wpm),
     rankText,
     onAgain: () => beginDaily({
       practice: true,
@@ -3130,6 +3193,7 @@ function soloResultsView() {
       accuracy: run.accuracy || 0,
       ms: run.ms || 0,
       errors: run.errors || 0,
+      officialNote: officialResultNote(livePace, run.wpm),
       oppWpm: wpm(length, Math.max(1, state.versus.finishMs || 0)),
       oppMs: state.versus.finishMs || 0,
       oppLabel: state.versus.kind === "ghost" ? "Ghost" : "Bot",
@@ -3145,6 +3209,7 @@ function soloResultsView() {
     accuracy: run.accuracy || 0,
     ms: run.ms || 0,
     errors: run.errors || 0,
+    officialNote: officialResultNote(livePace, run.wpm),
     signedIn: state.session === "in",
     loginHref: state.config?.oauth ? "/auth/login" : "",
     onAgain: () => beginSolo({ same: true }),

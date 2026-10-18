@@ -100,6 +100,7 @@ export function renderDailyResults(parent, h, view) {
   parent.append(h("p", { class: "pill", text: view.badge || "Practice" }));
   if (view.notice) parent.append(h("p", { class: "muted", text: view.notice }));
   if (view.sentence) parent.append(h("p", { class: "quote", text: view.sentence }));
+  if (view.officialNote) parent.append(h("p", { class: "hint official-note", text: view.officialNote }));
   const stats = h("div", { class: "solo-stats" });
   stats.append(
     stat(h, "WPM", Number(view.wpm || 0).toFixed(1)),

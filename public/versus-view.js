@@ -71,6 +71,7 @@ export function renderVersusResults(parent, h, view) {
   parent.append(h("p", { class: "versus-outcome", text: view.summary || "" }));
   parent.append(h("p", { class: "muted", text: "This run stays on this browser. It does not change rating." }));
   parent.append(h("p", { class: "quote", text: view.sentence || "" }));
+  if (view.officialNote) parent.append(h("p", { class: "hint official-note", text: view.officialNote }));
   const stats = h("div", { class: "solo-stats" });
   stats.append(
     stat(h, "WPM", Number(view.wpm).toFixed(1)),

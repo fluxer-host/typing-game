@@ -12,6 +12,7 @@ export function renderSoloResults(parent, h, view) {
   parent.append(h("p", { class: "pill", text: "Practice" }));
   parent.append(h("p", { class: "muted", text: "This run stays on this browser. It is not ranked." }));
   parent.append(h("p", { class: "quote", text: view.sentence || "" }));
+  if (view.officialNote) parent.append(h("p", { class: "hint official-note", text: view.officialNote }));
   const stats = h("div", { class: "solo-stats" });
   stats.append(
     stat(h, "WPM", Number(view.wpm).toFixed(1)),
