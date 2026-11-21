@@ -45,6 +45,19 @@ export function missLabel(ch) {
   return ch || "";
 }
 
+// Shared races count 3, 2, 1, then show "go" for 650ms after startAt.
+// The daily challenge has no shared start, so it shows none of that overlay.
+export function countCue(leftMs, daily) {
+  if (daily) return "";
+  const left = Number(leftMs);
+  if (!Number.isFinite(left)) return "";
+  if (left > 2000) return "3";
+  if (left > 1000) return "2";
+  if (left > 0) return "1";
+  if (left > -650) return "go";
+  return "";
+}
+
 export function pageTitle(phase) {
   if (phase === "countdown") return "Typing race, countdown";
   if (phase === "race" || phase === "finishing") return "Typing race, racing";

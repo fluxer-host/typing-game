@@ -23,7 +23,7 @@ import {
 } from "../src/settings.js";
 import { lengthList } from "../src/lengths.js";
 import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
-import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "./passage.js";
+import { characterClass, characterText, countCue, missLabel, pageTitle, typedMiss } from "./passage.js";
 import { raceKeyPlan } from "./keys.js";
 import { appendLadders } from "./ladder-picker.js";
 import {
@@ -2802,12 +2802,10 @@ setInterval(() => {
   const count = document.getElementById("count");
   if (!count) return;
   const left = state.startAt - serverNow();
-  if (left > 2000) showCount(count, "3");
-  else if (left > 1000) showCount(count, "2");
-  else if (left > 0) showCount(count, "1");
-  else if (left > -650) {
-    showCount(count, "go");
-    beginRace();
+  const cue = countCue(left, Boolean(state.daily));
+  if (cue) {
+    showCount(count, cue);
+    if (cue === "go") beginRace();
   } else {
     count.hidden = true;
     beginRace();

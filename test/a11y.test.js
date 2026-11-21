@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { compositeHex, contrastRatio, relativeLuminance } from "../public/contrast.js";
-import { characterClass, characterText, missLabel, pageTitle, typedMiss } from "../public/passage.js";
+import { characterClass, characterText, countCue, missLabel, pageTitle, typedMiss } from "../public/passage.js";
 
 const css = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
@@ -80,6 +80,14 @@ test("the page title follows the race phase and not the hostname", () => {
   assert.equal(pageTitle(""), "Typing race");
   assert.equal(app.includes("document.title = host"), false);
   assert.match(app, /pageTitle\(state\.phase\)/);
+  assert.equal(countCue(2500, false), "3");
+  assert.equal(countCue(1500, false), "2");
+  assert.equal(countCue(500, false), "1");
+  assert.equal(countCue(-100, false), "go");
+  assert.equal(countCue(-650, false), "");
+  assert.equal(countCue(-100, true), "");
+  assert.equal(countCue(2500, true), "");
+  assert.match(app, /countCue\(left, Boolean\(state\.daily\)\)/);
 });
 
 test("every text colour in the palette clears WCAG AA", () => {
