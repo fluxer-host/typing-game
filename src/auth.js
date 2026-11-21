@@ -19,7 +19,7 @@ import { resolveUser } from "./identity.js";
 const PALETTE = [0x4641d9, 0x7d7bff, 0x3dd68c, 0xe6b450, 0xff5d73, 0x5cc8ff];
 
 function apiBase(env) {
-  return String(env.FLUXER_API || "https://api.fluxer.app").replace(/\/$/, "");
+  return String(env.FLUXER_API || "https://fluxer.com/api").replace(/\/$/, "");
 }
 
 export function redirectUri(request, env) {

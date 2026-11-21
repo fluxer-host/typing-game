@@ -53,7 +53,7 @@ npm run test:live    # while wrangler dev is running
 
 ## Fluxer OAuth
 
-Create an application with `POST /v1/oauth2/applications` while signed in to Fluxer (user session, not a bot token). The docs are at https://docs.fluxer.app/http-api/applications/ and https://docs.fluxer.app/http-api/oauth2/ . The client id is the application id. The client secret is returned once, from create or from reset client secret.
+Create an application with `POST /v1/oauth2/applications` while signed in to Fluxer (user session, not a bot token). The docs are at https://docs.fluxer.com/http-api/applications/ and https://docs.fluxer.com/http-api/oauth2/ . The client id is the application id. The client secret is returned once, from create or from reset client secret.
 
 Register each public origin's callback exactly. Fluxer compares them byte for byte. HTTP is allowed only for localhost, a `.localhost` host, or an IP literal. Every other host has to be HTTPS.
 
@@ -65,7 +65,7 @@ The Worker builds the callback from the host the browser called, plus `/auth/cal
 
 The site asks only for the `identify` scope. It stores the refresh token so sign-out can revoke the grant. Access tokens last 7 days, refresh tokens 30 days. The refresh token is encrypted with AES-GCM before it is written. The key is `TOKEN_ENCRYPTION_KEY`, a Worker secret, not the Fluxer client secret and not `SESSION_SECRET`. Generate it with `openssl rand -base64 32` and set it with `npx wrangler secret put TOKEN_ENCRYPTION_KEY`. Put that key in `.dev.vars` for local OAuth. Rows saved before that key existed are plaintext. The next signed-in request re-encrypts them. If the key is missing, a new login still works and the refresh token is not stored, so sign-out cannot revoke that grant.
 
-Avatars use the hosted instance discovery document (`https://api.fluxer.app/.well-known/fluxer`): `endpoints.media` and `endpoints.static_cdn`. Those bases are `MEDIA_BASE` and `STATIC_CDN` in `wrangler.jsonc`.
+Sign-in calls `https://fluxer.com/api`, from `FLUXER_API` in `wrangler.jsonc`. Avatars use the hosted instance discovery document (`https://fluxer.com/.well-known/fluxer`): `endpoints.media` and `endpoints.static_cdn`. Those bases are `MEDIA_BASE` and `STATIC_CDN` in `wrangler.jsonc`.
 
 ## Deploy
 

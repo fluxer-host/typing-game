@@ -30,7 +30,7 @@
     }
   ],
   "vars": {
-    "FLUXER_API": "https://api.fluxer.app",
+    "FLUXER_API": "https://fluxer.com/api",
     "MEDIA_BASE": "https://fluxerusercontent.com",
     "STATIC_CDN": "https://fluxerstatic.com"
   },
