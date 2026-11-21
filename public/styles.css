@@ -879,6 +879,10 @@ button:focus-visible, a:focus-visible, input:focus-visible,
 
 .ladder-table .col-score { width: 4.6rem; }
 
+.ladder-table .col-total { width: 6.4rem; }
+
+.ladder-table .col-days { width: 3.6rem; }
+
 .ladder-table .col-secondary { width: 4.8rem; }
 
 .ladder-table .col-extra { width: 5.2rem; }

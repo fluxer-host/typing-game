@@ -12,6 +12,7 @@ import {
   DAILY_STARTS_PER_DAY,
   dailyPassage,
   dailyScoreElapsed,
+  dailySpanWindow,
   dayAllowed,
   isBetterDailyScore,
   isUniqueViolation,
@@ -193,6 +194,19 @@ test("query parsing rejects a bad ladder, a bad day, and a bad limit", () => {
   const today = parseDailyQuery(params(""), now);
   assert.equal(today.ok, true);
   assert.equal(today.day, "2026-10-18");
+  assert.equal(today.span, "day");
+  assert.equal(parseDailyQuery(params("span=nope"), now).error, "span");
+  const weekQuery = parseDailyQuery(params("span=week&day=2020-01-01"), now);
+  assert.equal(weekQuery.ok, true);
+  assert.equal(weekQuery.span, "week");
+  assert.equal(weekQuery.day, "2026-10-18");
+  assert.deepEqual(dailySpanWindow("week", now), { span: "week", from: "2026-10-12", to: "2026-10-18" });
+  assert.deepEqual(dailySpanWindow("month", now), { span: "month", from: "2026-09-19", to: "2026-10-18" });
+  assert.deepEqual(dailySpanWindow("month", Date.parse("2026-03-01T00:00:00.000Z")), {
+    span: "month",
+    from: "2026-01-31",
+    to: "2026-03-01",
+  });
   assert.equal(today.limit, DAILY_BOARD_DEFAULT_LIMIT);
   assert.equal(parseDailyQuery(params("limit=100"), now).limit, 100);
   assert.equal(parseDailyQuery(params("limit=101"), now).error, "limit");
@@ -663,6 +677,77 @@ test("the faster score ranks first and the board hides internal ids", async () =
     assert.equal("id" in row, false);
     assert.equal("user_id" in row, false);
   }
+});
+
+test("a week sums saved days and a missing day adds nothing", async () => {
+  const { env } = sqliteEnv();
+  const now = Date.parse("2026-10-18T15:00:00.000Z");
+  const people = [
+    ["ada-secret", "Ada"],
+    ["bea-secret", "Bea"],
+    ["cal-secret", "Cal"],
+    ["dee-secret", "Dee"],
+    ["eve-secret", "Eve"],
+    ["fay-secret", "Fay"],
+  ];
+  for (const [id, name] of people) {
+    await addUser(env, id, { username: id, globalName: name, avatar: "abc123" });
+  }
+  const insert = (id, day, wpm, accuracy, created, ladder = "desktop") => env.DB.prepare(
+    `INSERT INTO daily_results (
+       user_id, ladder, day, passage_id, wpm, accuracy, duration_ms, started_at, finished_at, created_at
+     ) VALUES (?, ?, ?, 'passage', ?, ?, 1000, 1, 2, ?)`,
+  ).bind(id, ladder, day, wpm, accuracy, created).run();
+  await insert("ada-secret", "2026-10-12", 50, 90, 1);
+  await insert("ada-secret", "2026-10-18", 50, 90, 8);
+  await insert("bea-secret", "2026-10-18", 100, 100, 2);
+  await insert("cal-secret", "2026-10-17", 40, 80, 3);
+  await insert("cal-secret", "2026-10-18", 60, 100, 10);
+  await insert("dee-secret", "2026-10-16", 50, 95, 4);
+  await insert("dee-secret", "2026-10-18", 50, 95, 20);
+  await insert("eve-secret", "2026-10-15", 50, 90, 5);
+  await insert("eve-secret", "2026-10-18", 50, 90, 5);
+  await insert("fay-secret", "2026-10-14", 50, 90, 6);
+  await insert("fay-secret", "2026-10-18", 50, 90, 9);
+  await insert("ada-secret", "2026-10-11", 200, 100, 1);
+  await insert("bea-secret", "2026-10-18", 80, 100, 1, "mobile");
+
+  const board = await loadDailyBoard(env, {
+    ladder: "desktop",
+    day: "2020-01-01",
+    span: "week",
+    limit: 25,
+    user: { id: "ada-secret", username: "ada-secret", global_name: "Ada", avatar: "abc123" },
+    now,
+  });
+  assert.equal(board.span, "week");
+  assert.equal(board.from, "2026-10-12");
+  assert.equal(board.to, "2026-10-18");
+  assert.equal(board.day, "2026-10-18");
+  assert.deepEqual(board.rows.map((row) => row.name), ["Dee", "Eve", "Ada", "Fay", "Cal", "Bea"]);
+  assert.equal(board.rows[2].wpm, 100);
+  assert.equal(board.rows[2].days, 2);
+  assert.equal(board.rows[2].accuracy, 90);
+  assert.equal(board.you.rank, 3);
+  assert.equal(board.you.days, 2);
+  assert.equal("id" in board.rows[2], false);
+  const packed = JSON.stringify(board).replaceAll(board.rows[2].avatar, "");
+  assert.equal(packed.includes("ada-secret"), false);
+
+  const month = await loadDailyBoard(env, {
+    ladder: "desktop",
+    span: "month",
+    limit: 1,
+    offset: 0,
+    user: null,
+    now,
+  });
+  assert.equal(month.from, "2026-09-19");
+  assert.equal(month.rows[0].name, "Ada");
+  assert.equal(month.rows[0].wpm, 300);
+  assert.equal(month.rows[0].days, 3);
+  assert.equal(month.total, 6);
+  assert.equal(month.hasMore, true);
 });
 
 test("a custom Fluxer picture URL stays on the daily row without an id field", () => {

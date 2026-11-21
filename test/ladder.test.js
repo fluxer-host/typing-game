@@ -222,6 +222,7 @@ test("hash routes keep the tab, the page, and the daily day", () => {
     assert.equal(again.page, parsed.page);
     assert.equal(again.ladder, parsed.tab === "daily" ? parsed.ladder : "desktop");
     assert.equal(again.day, parsed.tab === "daily" ? parsed.day : "");
+    assert.equal(again.view, parsed.tab === "daily" ? parsed.view : "day");
     assert.equal(again.invalid, false);
   }
   assert.equal(parseLadderHash("#/ladder").tab, "desktop");
@@ -255,6 +256,13 @@ test("hash routes keep the tab, the page, and the daily day", () => {
   assert.equal(ratingPagePath({ mode: "mobile", page: 2 }), "/api/leaderboard?mode=mobile&limit=25&offset=25");
   assert.equal(dailyPagePath({ ladder: "cursor", day: "2026-10-17", page: 3 }), "/api/daily?ladder=cursor&limit=25&offset=50&day=2026-10-17");
   assert.equal(dailyPagePath({ ladder: "desktop", page: 1 }).includes("day="), false);
+  assert.equal(ladderHash(parseLadderHash("#/ladder/daily?view=week")), "#/ladder/daily?view=week");
+  assert.equal(ladderHash(parseLadderHash("#/ladder/daily?ladder=cursor&view=month&page=2")), "#/ladder/daily?ladder=cursor&view=month&page=2");
+  assert.equal(parseLadderHash("#/ladder/daily?view=nope").invalid, true);
+  assert.equal(parseLadderHash("#/ladder/daily?view=nope").view, "day");
+  assert.equal(ladderHash(parseLadderHash("#/ladder/daily?view=week&day=2026-10-17")), "#/ladder/daily?view=week");
+  assert.equal(dailyPagePath({ ladder: "desktop", view: "week", day: "2026-10-17", page: 1 }), "/api/daily?ladder=desktop&limit=25&offset=0&span=week");
+  assert.equal(dailyPagePath({ ladder: "mobile", view: "month", page: 2 }), "/api/daily?ladder=mobile&limit=25&offset=25&span=month");
   assert.equal(pageTitle("ladder"), "Typing race, ladder");
   assert.equal(sessionShell({ session: "out", phase: "lobby", lobbyOpen: false, view: "ladder" }), "ladder");
   assert.equal(sessionShell({ session: "in", phase: "race", lobbyOpen: false, view: "ladder" }), "race");
@@ -299,6 +307,32 @@ test("the ladder model hides filters the tables cannot answer", () => {
   assert.equal(daily.youText, "Your rank is 2.");
   assert.equal(daily.around[0].self, true);
   assert.deepEqual(daily.columns.map((column) => column.label), ["Rank", "Racer", "WPM", "Accuracy"]);
+  assert.equal(daily.showRange, false);
+  assert.deepEqual(daily.spans.map((item) => item.label), ["Today", "Week", "Month"]);
+  assert.equal(daily.spans[0].pressed, true);
+  const week = ladderViewModel({
+    tab: "daily",
+    view: "week",
+    page: 1,
+    ladder: "desktop",
+    status: "ready",
+    data: {
+      total: 1,
+      span: "week",
+      from: "2026-10-12",
+      to: "2026-10-18",
+      serverNow: Date.parse("2026-10-18T12:00:00.000Z"),
+      rows: [{ rank: 1, name: "Ada", wpm: 420.5, accuracy: 98.2, days: 6 }],
+    },
+  });
+  assert.equal(week.showDay, false);
+  assert.equal(week.showRange, true);
+  assert.equal(week.dayLabel, "12 Oct 2026 UTC through 18 Oct 2026 UTC");
+  assert.equal(week.rows[0].primary, "420.5");
+  assert.equal(week.rows[0].secondary, "6");
+  assert.equal(week.rows[0].extra, "98.2%");
+  assert.deepEqual(week.columns.map((column) => column.label), ["Rank", "Racer", "Total WPM", "Days", "Accuracy"]);
+  assert.equal(week.spans.find((item) => item.id === "week").pressed, true);
   const today = ladderViewModel({
     tab: "daily",
     page: 2,

@@ -12,6 +12,7 @@ import {
   DAILY_STARTS_PER_DAY,
   dailyPassage,
   dailyScoreElapsed,
+  dailySpanWindow,
   isUniqueViolation,
   passageForAttempt,
   replayDaily,
@@ -324,7 +325,114 @@ async function dailyPage(env, ladder, day, offset, limit) {
   return listed.results || [];
 }
 
-export async function loadDailyBoard(env, { ladder, day, limit, offset = 0, user, now }) {
+const SPAN_SCORED_SQL = `
+  SELECT user_id,
+         ROUND(SUM(wpm), 1) AS wpm,
+         ROUND(AVG(accuracy), 1) AS accuracy,
+         COUNT(*) AS days,
+         MAX(created_at) AS created_at
+  FROM daily_results
+  WHERE ladder = ? AND day >= ? AND day <= ?
+  GROUP BY user_id`;
+
+const SPAN_PAGE_SQL = `SELECT id, username, global_name, avatar, avatar_color, wpm, accuracy, days, rank
+ FROM (
+   SELECT u.id, u.username, u.global_name, u.avatar, u.avatar_color,
+          scored.wpm, scored.accuracy, scored.days,
+          ROW_NUMBER() OVER (
+            ORDER BY scored.wpm DESC, scored.days DESC, scored.accuracy DESC, scored.created_at ASC
+          ) AS rank
+   FROM (${SPAN_SCORED_SQL}) AS scored
+   JOIN users u ON u.id = scored.user_id
+ ) AS ranked
+ WHERE rank > ? AND rank <= ?
+ ORDER BY rank ASC`;
+
+function presentSpan(env, row, user) {
+  return shapeDailyRow({
+    id: row.id,
+    name: displayName(boardUser(row)),
+    avatar: avatarUrl(boardUser(row), env),
+    color: row.avatar_color,
+    wpm: row.wpm,
+    accuracy: row.accuracy,
+    days: row.days,
+    rank: Number(row.rank),
+    self: Boolean(user && row.id === user.id),
+  });
+}
+
+async function loadSpanBoard(env, { ladder, span, limit, offset = 0, user, now }) {
+  const window = dailySpanWindow(span, now);
+  if (!window) return { ladder, span, total: 0, rows: [], you: null };
+  const passage = dailyPassage(ladder, window.to);
+  const counted = await env.DB.prepare(
+    `SELECT COUNT(*) AS total FROM (${SPAN_SCORED_SQL}) AS scored`,
+  ).bind(ladder, window.from, window.to).first();
+  const total = Number(counted?.total || 0);
+  const start = Number(offset) > 0 ? Number(offset) : 0;
+  const listed = await env.DB.prepare(SPAN_PAGE_SQL)
+    .bind(ladder, window.from, window.to, start, start + limit)
+    .all();
+  const rows = (listed.results || []).map((row) => presentSpan(env, row, user));
+  let you = null;
+  if (user) {
+    const mine = await env.DB.prepare(
+      `SELECT wpm, accuracy, days, rank FROM (
+         SELECT user_id, wpm, accuracy, days,
+                ROW_NUMBER() OVER (
+                  ORDER BY wpm DESC, days DESC, accuracy DESC, created_at ASC
+                ) AS rank
+         FROM (${SPAN_SCORED_SQL}) AS scored
+       ) AS ranked
+       WHERE user_id = ?`,
+    ).bind(ladder, window.from, window.to, user.id).first();
+    if (mine) {
+      you = shapeDailyRow({
+        name: displayName(user),
+        avatar: avatarUrl(user, env),
+        color: user.avatar_color,
+        wpm: mine.wpm,
+        accuracy: mine.accuracy,
+        days: mine.days,
+        rank: Number(mine.rank),
+        self: true,
+      });
+    }
+  }
+  const body = {
+    ladder,
+    span: window.span,
+    from: window.from,
+    to: window.to,
+    day: window.to,
+    serverNow: now,
+    nextDayAt: (parseUtcDay(window.to)?.startMs ?? 0) + DAY_MS,
+    length: DAILY_LENGTH,
+    difficulty: passage?.difficulty || "",
+    passageId: passage?.id || "",
+    passage: passage?.text || "",
+    limit,
+    offset: start,
+    total,
+    hasMore: start + rows.length < total,
+    rows,
+    you,
+  };
+  const aroundWindow = you?.rank ? rankWindow(you.rank, total) : null;
+  if (aroundWindow) {
+    const around = await env.DB.prepare(SPAN_PAGE_SQL)
+      .bind(ladder, window.from, window.to, aroundWindow.offset, aroundWindow.offset + aroundWindow.limit)
+      .all();
+    body.around = (around.results || []).map((row) => presentSpan(env, row, user));
+  }
+  return body;
+}
+
+export async function loadDailyBoard(env, { ladder, day, span = "day", limit, offset = 0, user, now }) {
+  if (span === "week" || span === "month") {
+    return loadSpanBoard(env, { ladder, span, limit, offset, user, now });
+  }
   const passage = dailyPassage(ladder, day);
   const counted = await env.DB.prepare(
     "SELECT COUNT(*) AS total FROM daily_results WHERE ladder = ? AND day = ?",

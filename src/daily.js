@@ -10,6 +10,7 @@ export const DAILY_LENGTH = "set";
 export const DAILY_MAX_ATTEMPT_MS = 240_000;
 export const DAILY_GRACE_MS = 240_000;
 export const DAILY_RESULT_RETENTION_DAYS = 90;
+export const DAILY_SPAN_DAYS = { day: 1, week: 7, month: 30 };
 export const DAILY_ATTEMPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DAILY_BOARD_DEFAULT_LIMIT = 25;
 export const DAILY_BOARD_MAX_LIMIT = 100;
@@ -73,6 +74,15 @@ export function countdownLabel(remainingMs) {
   return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 }
 
+// Week and month end on the UTC day that contains now. The first day is included.
+export function dailySpanWindow(span, nowMs) {
+  const length = DAILY_SPAN_DAYS[span];
+  const start = utcDayStart(nowMs);
+  if (!length || start == null) return null;
+  const fromMs = start - (length - 1) * DAY_MS;
+  return { span, from: utcDayString(fromMs), to: utcDayString(start) };
+}
+
 export function dayAllowed(day, nowMs, retentionDays = DAILY_RESULT_RETENTION_DAYS) {
   const parsed = parseUtcDay(day);
   const today = utcDayStart(nowMs);
@@ -96,17 +106,24 @@ function whole(value) {
 export function parseDailyQuery(params, nowMs) {
   const ladder = params.get("ladder") || "desktop";
   if (!isMode(ladder)) return { ok: false, error: "ladder" };
-  const dayRaw = params.get("day");
-  const day = dayRaw == null || dayRaw === "" ? utcDayString(nowMs) : dayRaw;
-  const allowed = dayAllowed(day, nowMs);
-  if (!allowed.ok) return allowed;
+  const spanRaw = params.get("span");
+  const span = spanRaw == null || spanRaw === "" ? "day" : spanRaw;
+  if (!Object.hasOwn(DAILY_SPAN_DAYS, span)) return { ok: false, error: "span" };
+  let day = utcDayString(nowMs);
+  if (span === "day") {
+    const dayRaw = params.get("day");
+    const asked = dayRaw == null || dayRaw === "" ? day : dayRaw;
+    const allowed = dayAllowed(asked, nowMs);
+    if (!allowed.ok) return allowed;
+    day = allowed.day;
+  }
   const limitRaw = params.get("limit");
   const limit = limitRaw == null || limitRaw === "" ? DAILY_BOARD_DEFAULT_LIMIT : whole(limitRaw);
   if (limit == null || limit < 1 || limit > DAILY_BOARD_MAX_LIMIT) return { ok: false, error: "limit" };
   const offsetRaw = params.get("offset");
   const offset = offsetRaw == null || offsetRaw === "" ? 0 : whole(offsetRaw);
   if (offset == null || offset < 0 || offset > DAILY_BOARD_MAX_OFFSET) return { ok: false, error: "offset" };
-  return { ok: true, ladder, day: allowed.day, limit, offset };
+  return { ok: true, ladder, day, span, limit, offset };
 }
 
 export function dailySeed(dayNumber, ladder) {
@@ -263,6 +280,7 @@ export function shapeDailyRow(input) {
   };
   if (input?.self) row.self = true;
   if (Number.isFinite(Number(input?.ms))) row.ms = Number(input.ms);
+  if (Number.isFinite(Number(input?.days))) row.days = Number(input.days);
   return row;
 }
 

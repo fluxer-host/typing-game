@@ -89,27 +89,36 @@ export function parseLadderHash(hash) {
   if (parsedPage.invalid) invalid = true;
   let ladder = "desktop";
   let day = "";
+  let view = "day";
   if (tab === "daily") {
     const asked = params.get("ladder");
     if (asked) {
       if (isMode(asked)) ladder = asked;
       else invalid = true;
     }
+    const askedView = params.get("view");
+    if (askedView) {
+      if (askedView === "week" || askedView === "month") view = askedView;
+      else invalid = true;
+    }
     const dayRaw = params.get("day");
     if (dayRaw) {
-      if (parseUtcDay(dayRaw)) day = dayRaw;
+      if (view !== "day") invalid = true;
+      else if (parseUtcDay(dayRaw)) day = dayRaw;
       else invalid = true;
     }
   }
-  return { tab, page, ladder, day, invalid };
+  return { tab, page, ladder, day, view, invalid };
 }
 
-export function ladderHash({ tab, page, ladder, day } = {}) {
+export function ladderHash({ tab, page, ladder, day, view } = {}) {
   const id = TAB_IDS.has(tab) ? tab : "desktop";
   const params = new URLSearchParams();
+  const span = view === "week" || view === "month" ? view : "day";
   if (id === "daily") {
     if (isMode(ladder) && ladder !== "desktop") params.set("ladder", ladder);
-    if (parseUtcDay(day || "")) params.set("day", day);
+    if (span !== "day") params.set("view", span);
+    else if (parseUtcDay(day || "")) params.set("day", day);
   }
   const safePage = Number.isInteger(page) && page > 1 && page <= maxLadderPage() ? page : 0;
   if (safePage > 1) params.set("page", String(safePage));
@@ -132,6 +141,7 @@ export function freshLadder(parsed) {
     page: parsed?.page || 1,
     ladder: parsed?.ladder || "desktop",
     day: parsed?.day || "",
+    view: parsed?.view === "week" || parsed?.view === "month" ? parsed.view : "day",
     status: "idle",
     error: "",
     data: null,
@@ -139,7 +149,7 @@ export function freshLadder(parsed) {
 }
 
 export function ladderKey(row) {
-  return `${row?.tab || ""}|${row?.page || 1}|${row?.ladder || ""}|${row?.day || ""}`;
+  return `${row?.tab || ""}|${row?.page || 1}|${row?.ladder || ""}|${row?.day || ""}|${row?.view || "day"}`;
 }
 
 export function shiftUtcDay(day, delta) {
@@ -167,13 +177,14 @@ export function ratingPagePath({ mode, page }) {
   return `/api/leaderboard?${params.toString()}`;
 }
 
-export function dailyPagePath({ ladder, day, page }) {
+export function dailyPagePath({ ladder, day, page, view }) {
   const offset = pageOffset(page);
   const params = new URLSearchParams();
   params.set("ladder", isMode(ladder) ? ladder : "desktop");
   params.set("limit", String(LADDER_PAGE_SIZE));
   params.set("offset", String(offset == null ? 0 : offset));
-  if (parseUtcDay(day || "")) params.set("day", day);
+  if (view === "week" || view === "month") params.set("span", view);
+  else if (parseUtcDay(day || "")) params.set("day", day);
   return `/api/daily?${params.toString()}`;
 }
 
@@ -241,13 +252,26 @@ export function ladderAnnounce(ladder) {
   if (ladder?.status === "loading") return "Loading the ladder.";
   if (ladder?.status === "error") return ladder.error || "The ladder did not load.";
   const total = Number(ladder?.data?.total) || 0;
+  const view = ladder?.view === "week" || ladder?.view === "month" ? ladder.view : "day";
   if (ladder?.status === "empty" || total === 0) {
+    if (ladder?.tab === "daily" && view === "week") return "Daily ladder. No scores in this week yet.";
+    if (ladder?.tab === "daily" && view === "month") return "Daily ladder. No scores in this month yet.";
     return ladder?.tab === "daily"
       ? "Daily ladder. No scores for this day yet."
       : `${name} ladder. No rated races on this ladder yet.`;
   }
-  const when = ladder?.tab === "daily" && ladder.data?.day ? ` ${formatUtcDay(ladder.data.day)}.` : "";
+  const when = ladder?.tab === "daily" ? dailyWhen(ladder, view) : "";
   return `${name} ladder.${when} ${pageLabel(pageWindow(total, ladder.page))}`.replace(/\s+/g, " ").trim();
+}
+
+function dailyWhen(ladder, view) {
+  if (view === "week" || view === "month") {
+    const from = ladder?.data?.from;
+    const to = ladder?.data?.to;
+    if (parseUtcDay(from || "") && parseUtcDay(to || "")) return ` ${formatUtcDay(from)} through ${formatUtcDay(to)}.`;
+    return view === "week" ? " Past 7 UTC days." : " Past 30 UTC days.";
+  }
+  return ladder?.data?.day ? ` ${formatUtcDay(ladder.data.day)}.` : "";
 }
 
 function displayRow(row, kind, youRank) {
@@ -258,22 +282,35 @@ function displayRow(row, kind, youRank) {
     avatar: row?.avatar || null,
     color: row?.color ?? null,
     self,
-    primary: kind === "daily" ? formatWpm(row?.wpm) : formatRating(row?.rating),
-    secondary: kind === "daily" ? formatAccuracy(row?.accuracy) : String(Number(row?.races) || 0),
-    extra: kind === "daily" ? "" : formatWinRate(row?.wins, row?.races),
+    primary: kind === "rating" ? formatRating(row?.rating) : formatWpm(row?.wpm),
+    secondary: kind === "span"
+      ? String(Number(row?.days) || 0)
+      : kind === "daily"
+        ? formatAccuracy(row?.accuracy)
+        : String(Number(row?.races) || 0),
+    extra: kind === "span" ? formatAccuracy(row?.accuracy) : kind === "daily" ? "" : formatWinRate(row?.wins, row?.races),
   };
 }
 
 export function ladderViewModel(ladder) {
   const tab = TAB_IDS.has(ladder?.tab) ? ladder.tab : "desktop";
-  const kind = tab === "daily" ? "daily" : "rating";
+  const view = tab === "daily" && (ladder?.view === "week" || ladder?.view === "month") ? ladder.view : "day";
+  const kind = tab !== "daily" ? "rating" : view === "day" ? "daily" : "span";
   const data = ladder?.data || null;
   const total = Number(data?.total) || 0;
   const rawStatus = ladder?.status || "idle";
   const status = rawStatus === "idle" ? "loading" : rawStatus;
   const window = pageWindow(total, ladder?.page || 1);
   const youRank = data?.you?.rank || 0;
-  const columns = kind === "daily"
+  const columns = kind === "span"
+    ? [
+      { key: "rank", label: "Rank", className: "col-rank" },
+      { key: "name", label: "Racer", className: "col-name" },
+      { key: "primary", label: "Total WPM", className: "col-score col-total" },
+      { key: "secondary", label: "Days", className: "col-days" },
+      { key: "extra", label: "Accuracy", className: "col-secondary" },
+    ]
+    : kind === "daily"
     ? [
       { key: "rank", label: "Rank", className: "col-rank" },
       { key: "name", label: "Racer", className: "col-name" },
@@ -294,11 +331,20 @@ export function ladderViewModel(ladder) {
   const dayLabel = shownDay ? formatUtcDay(shownDay) : "";
   const ladderId = isMode(ladder?.ladder) ? ladder.ladder : "desktop";
   const label = tabLabel(tab);
+  const rangeFrom = data?.from || "";
+  const rangeTo = data?.to || "";
+  const rangeLabel = parseUtcDay(rangeFrom) && parseUtcDay(rangeTo)
+    ? `${formatUtcDay(rangeFrom)} through ${formatUtcDay(rangeTo)}`
+    : view === "week"
+      ? "Past 7 UTC days"
+      : "Past 30 UTC days";
   const caption = status === "loading"
     ? "Loading the ladder."
-    : kind === "daily"
-      ? `Daily ladder, ${tabLabel(ladderId)}${dayLabel ? `, ${dayLabel}` : ""}`
-      : `${label} ladder`;
+    : kind === "span"
+      ? `Daily ladder, ${tabLabel(ladderId)}, ${rangeLabel}`
+      : kind === "daily"
+        ? `Daily ladder, ${tabLabel(ladderId)}${dayLabel ? `, ${dayLabel}` : ""}`
+        : `${label} ladder`;
   return {
     heading: "Ladder",
     tabs: LADDER_TABS.map((item) => ({
@@ -322,11 +368,24 @@ export function ladderViewModel(ladder) {
     hasNext: status !== "loading" && status !== "error" && window.hasNext,
     youText: status === "ready" && youRank ? `Your rank is ${youRank}.` : "",
     jump: status === "ready" && Boolean(youRank),
-    emptyText: kind === "daily" ? "No scores for this day yet." : "No rated races on this ladder yet.",
+    emptyText: kind === "span"
+      ? (view === "week" ? "No scores in this week yet." : "No scores in this month yet.")
+      : kind === "daily"
+        ? "No scores for this day yet."
+        : "No rated races on this ladder yet.",
     showLength: false,
     showPeriod: false,
     showDay: kind === "daily",
-    dayLabel,
+    showRange: kind === "span",
+    showDailyLadder: tab === "daily",
+    dayLabel: kind === "span" ? rangeLabel : dayLabel,
+    spans: tab === "daily"
+      ? [
+        { id: "day", label: "Today", pressed: view === "day" },
+        { id: "week", label: "Week", pressed: view === "week" },
+        { id: "month", label: "Month", pressed: view === "month" },
+      ]
+      : [],
     dayPrevDisabled: !serverToday || !prevDay || prevDay < oldest,
     dayNextDisabled: !serverToday || !shownDay || shownDay >= serverToday,
     dailyLadders: LADDER_TABS.filter((item) => item.id !== "daily").map((item) => ({
@@ -334,7 +393,7 @@ export function ladderViewModel(ladder) {
       label: item.label,
       pressed: item.id === ladderId,
     })),
-    showToday: status === "error" && kind === "daily",
+    showToday: status === "error" && tab === "daily",
     busy: status === "loading",
     showPager: status === "ready" || status === "empty" || status === "loading",
     showAround: status === "ready" && Array.isArray(data?.around) && data.around.length > 0,

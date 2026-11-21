@@ -147,6 +147,11 @@ export function renderLadder(parent, h, model, actions) {
         onclick: () => actions.onDay(1),
       }),
     ]));
+  }
+  if (model.showRange) {
+    panel.append(h("p", { class: "ladder-day", id: "ladder-range", text: model.dayLabel }));
+  }
+  if (model.showDailyLadder) {
     panel.append(h("div", { class: "ladder-filters", role: "group", "aria-label": "Daily ladder" },
       model.dailyLadders.map((item) => h("button", {
         class: "btn",
@@ -154,6 +159,14 @@ export function renderLadder(parent, h, model, actions) {
         "aria-pressed": item.pressed ? "true" : "false",
         text: item.label,
         onclick: () => actions.onDailyLadder(item.id),
+      }))));
+    panel.append(h("div", { class: "ladder-filters", role: "group", "aria-label": "Daily range" },
+      (model.spans || []).map((item) => h("button", {
+        class: "btn",
+        type: "button",
+        "aria-pressed": item.pressed ? "true" : "false",
+        text: item.label,
+        onclick: () => actions.onView(item.id),
       }))));
   }
 

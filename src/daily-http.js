@@ -37,6 +37,7 @@ export async function dailyBoard(request, env, now = Date.now()) {
   const body = await loadDailyBoard(env, {
     ladder: parsed.ladder,
     day: parsed.day,
+    span: parsed.span,
     limit: parsed.limit,
     offset: parsed.offset,
     user: resolved?.user || null,

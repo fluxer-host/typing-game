@@ -3845,9 +3845,10 @@ function paintLadder() {
         if (next) goLadder({ day: next }, { focusId: "ladder-caption" });
       },
       onDailyLadder: (id) => goLadder({ ladder: id }, { focusId: "ladder-caption" }),
+      onView: (view) => goLadder(view === "day" ? { view } : { view, day: "" }, { focusId: "ladder-caption" }),
       onJump: jumpToRank,
       onRetry: () => pullLadder(),
-      onToday: () => goLadder({ day: "" }, { focusId: "ladder-caption" }),
+      onToday: () => goLadder({ view: "day", day: "" }, { focusId: "ladder-caption" }),
       onPlay: leaveLadder,
     });
   }
@@ -3887,10 +3888,12 @@ function goLadder(patch, { replace = false, focusId = "" } = {}) {
     page: patch.page ?? current.page,
     ladder: patch.ladder ?? current.ladder,
     day: patch.day !== undefined ? patch.day : current.day,
+    view: patch.view ?? current.view ?? "day",
   };
   if (patch.tab && patch.tab !== current.tab && patch.page == null) next.page = 1;
   if (patch.ladder && patch.ladder !== current.ladder && patch.page == null) next.page = 1;
   if (patch.day !== undefined && patch.day !== current.day && patch.page == null) next.page = 1;
+  if (patch.view && patch.view !== (current.view || "day") && patch.page == null) next.page = 1;
   const hash = ladderHash(next);
   state.ladderFocusId = focusId;
   const nextUrl = `${location.pathname}${location.search}${hash}`;
@@ -3915,13 +3918,14 @@ async function pullLadder() {
     page: state.ladder.page,
     ladder: state.ladder.ladder,
     day: state.ladder.day,
+    view: state.ladder.view || "day",
   };
   state.ladder.status = "loading";
   state.ladder.error = "";
   ensure();
   announce("Loading the ladder.");
   const path = query.tab === "daily"
-    ? dailyPagePath({ ladder: query.ladder, day: query.day, page: query.page })
+    ? dailyPagePath({ ladder: query.ladder, day: query.day, page: query.page, view: query.view })
     : ratingPagePath({ mode: query.tab, page: query.page });
   const result = await pull(path, { cache: "no-store" });
   if (epoch !== ladderEpoch) return;
@@ -3961,6 +3965,7 @@ function syncLadderHash() {
     page: again.page,
     ladder: again.ladder,
     day: again.day,
+    view: again.view,
   };
   return true;
 }
@@ -4284,6 +4289,7 @@ window.addEventListener("hashchange", () => {
       page: current.page,
       ladder: current.ladder,
       day: current.day,
+      view: current.view,
     };
   }
   if (state.route !== "stats") state.clearConfirm = false;
