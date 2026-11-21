@@ -351,20 +351,7 @@ a.btn { text-decoration: none; }
   font-feature-settings: "tnum" 1;
 }
 
-.fix-hint {
-  min-height: 2.8em;
-  margin: 8px 0 0;
-  color: var(--text);
-  font-weight: 650;
-}
-
-.fix-hint.is-quiet { visibility: hidden; }
-
-.ch.blocked {
-  outline: 2px solid var(--text);
-  outline-offset: 2px;
-  border-radius: 2px;
-}
+.restart-test { margin-top: 12px; }
 
 .passage-wrap { position: relative; min-height: 140px; }
 
@@ -589,7 +576,7 @@ tr.me { background: rgba(70, 65, 217, 0.16); }
 
 button:focus-visible, a:focus-visible, input:focus-visible,
 .mode:focus-visible, .length:focus-visible, .format-choice:focus-visible, .key:focus-visible,
-#leave-race:focus-visible, .forfeit button:focus-visible,
+#leave-race:focus-visible, #restart-test:focus-visible, .forfeit button:focus-visible,
 .net-banner button:focus-visible, .inline-error button:focus-visible {
   outline: 2px solid var(--flux-2);
   outline-offset: 2px;

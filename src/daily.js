@@ -2,7 +2,7 @@
 // The passage pick is pure so the Worker and the page choose the same text.
 
 import { isMode } from "./modes.js";
-import { MAX_KEYSTROKES_PER_SECOND, RATE_WINDOW_MS, validateProgress } from "./progress.js";
+import { MAX_KEYSTROKES_PER_SECOND, RATE_WINDOW_MS, matchCount, validateProgress } from "./progress.js";
 import { accuracy, wpm } from "./score.js";
 import { poolFor } from "./sentences.js";
 
@@ -211,14 +211,14 @@ export function replayDaily({ passage, steps, elapsedMs }) {
     total += 1;
     if (verdict.finished && i !== steps.length - 1) return { ok: false, reason: "malformed" };
   }
-  if (previous !== passage) return { ok: false, reason: "unfinished" };
+  if (previous.length !== passage.length) return { ok: false, reason: "unfinished" };
   return {
     ok: true,
     text: previous,
     okCount: ok,
     errCount: err,
     strokes: total,
-    wpm: wpm(passage.length, elapsedMs),
+    wpm: wpm(matchCount(previous, passage), elapsedMs),
     accuracy: accuracy(ok, err),
   };
 }

@@ -5,7 +5,7 @@ import { isLength, LENGTHS } from "./lengths.js";
 import { normalizeKind } from "./match.js";
 import { isMode } from "./modes.js";
 import { websocketOriginAllowed } from "./origin.js";
-import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, validateProgress } from "./progress.js";
+import { MAX_RACE_MESSAGE_CHARS, RATE_WINDOW_MS, matchCount, validateProgress } from "./progress.js";
 import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
 import { buildResults } from "./results.js";
 import { readFormat } from "./formats.js";
@@ -188,16 +188,18 @@ export class Race {
       else if (presence.dnfReason === "idle") status = "timeout";
       else if (presence.dnfReason === "disconnect" || dq) status = "disconnect";
       else if (!connected.has(player.id) && (presence.disconnectedAt != null || now >= this.state.startAt)) status = "away";
-      const index = finished ? this.state.sentence.length : progress.i || 0;
+      const text = typeof progress.text === "string" ? progress.text : "";
+      const caret = finished ? this.state.sentence.length : text.length;
+      const matched = finished ? this.state.sentence.length : matchCount(text, this.state.sentence || "");
       const end = finish?.at || now;
       const elapsed = Math.max(0, Math.min(end, now) - this.state.startAt);
       return {
         id: player.id,
-        i: index,
+        i: caret,
         ok: (finished ? finish : progress).ok || 0,
         err: (finished ? finish : progress).err || 0,
         finishedAt: finished ? finish.at : null,
-        wpm: now < this.state.startAt ? 0 : wpm(index, Math.max(1, elapsed)),
+        wpm: now < this.state.startAt ? 0 : wpm(matched, Math.max(1, elapsed)),
         status,
       };
     });
@@ -288,7 +290,8 @@ export class Race {
     return json({ ok: true });
   }
 
-  hello() {
+  hello(viewerId) {
+    const row = viewerId ? this.state.progress?.[viewerId] : null;
     return {
       t: "hello",
       raceId: this.state.raceId,
@@ -306,6 +309,11 @@ export class Race {
       finishes: this.state.finishes,
       results: this.state.results,
       racers: this.playerViews(),
+      you: {
+        text: typeof row?.text === "string" ? row.text : "",
+        ok: row?.ok || 0,
+        err: row?.err || 0,
+      },
     };
   }
 
@@ -334,7 +342,7 @@ export class Race {
     const outcome = applyRaceEvent(decision, { type: "reconnect", playerId: id }, now);
     if (outcome.ok) this.storeDecision(outcome.players);
     await this.noteProgress("reconnect", now);
-    server.send(JSON.stringify(this.hello()));
+    server.send(JSON.stringify(this.hello(id)));
     this.broadcast(this.snapshot());
     await this.settle(outcome.end);
     if (!this.state.results) await this.arm();
@@ -446,7 +454,7 @@ export class Race {
     if (verdict.finished && !timed) {
       this.state.finishes[player.id] = { at: now, ok: progress.ok, err: progress.err };
     }
-    const chunk = timed ? pullTimedReveal(this.state, progress.i) : null;
+    const chunk = timed ? pullTimedReveal(this.state, (progress.text || "").length) : null;
     await this.noteProgress(chunk ? "chunk" : (verdict.finished ? "finish" : "progress"), now);
     this.broadcast(this.snapshot());
     if (chunk) this.broadcast({ t: "chunk", sentence: chunk, serverNow: now });

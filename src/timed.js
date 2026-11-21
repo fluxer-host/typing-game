@@ -1,7 +1,7 @@
 // Timed races: a seeded passage stream, chunk reveal, and a clock-based result.
 // Scoring uses wpm and accuracy from score.js. Keystroke checks use validateProgress.
 
-import { validateProgress } from "./progress.js";
+import { matchCount, validateProgress } from "./progress.js";
 import { accuracy, wpm } from "./score.js";
 
 export const TIMED_CHUNK_CHARS = 180;
@@ -222,11 +222,13 @@ export function buildTimedResults(state, now) {
   const durationMs = Number(state.durationMs || state.limitMs) || 0;
   const timeUp = Boolean(state.timeUp) || (Number.isFinite(now) && Number.isFinite(state.startAt) && now >= state.startAt + durationMs);
   const prepared = (state.players || []).map((player) => {
-    const progress = state.progress?.[player.id] || { i: 0, ok: 0, err: 0 };
+    const progress = state.progress?.[player.id] || { i: 0, ok: 0, err: 0, text: "" };
     const presence = state.presence?.[player.id] || {};
     const dq = Boolean(progress.dq);
     const outcome = outcomeForTimed(presence, dq, timeUp);
-    const correct = Math.max(0, Number(progress.i) || 0);
+    const target = state.stream || state.sentence || "";
+    const hasText = typeof progress.text === "string";
+    const correct = hasText ? matchCount(progress.text, target) : Math.max(0, Number(progress.i) || 0);
     const ok = Number(progress.ok) || 0;
     const err = Number(progress.err) || 0;
     const typed = ok + err;

@@ -1,13 +1,13 @@
 import {
+  MISSED,
   applyTyping,
   consumeInput,
-  correctLength,
   emptyInputSession,
+  matchCount,
   textUnits,
 } from "./input.js";
 import { wpm } from "../src/score.js";
 import {
-  LIVE_FIX_HINT,
   emptyLiveTrack,
   liveStatsModel,
   officialResultNote,
@@ -367,7 +367,7 @@ function currentWpm() {
   if (state.daily && !state.daily.clock) return 0;
   const elapsed = serverNow() - state.startAt;
   if (elapsed < 400) return 0;
-  return wpm(correctLength(state.typed, state.sentence), elapsed);
+  return wpm(matchCount(state.typed, state.sentence), elapsed);
 }
 
 function shellName() {
@@ -769,12 +769,6 @@ function raceView() {
   }
   wrap.append(capture);
   box.append(wrap);
-  box.append(h("p", {
-    id: "fix-hint",
-    class: "fix-hint is-quiet",
-    "aria-hidden": "true",
-    text: LIVE_FIX_HINT,
-  }));
   const tap = h("button", {
     id: "tap-to-type",
     class: "btn tap-type",
@@ -784,12 +778,22 @@ function raceView() {
   });
   tap.addEventListener("click", () => focusCapture());
   box.append(tap);
+  const restart = state.localPractice ? " Tab, then Enter, restarts." : "";
   const hint = state.mode === "cursor"
-    ? "Click the keys. The keyboard does not type on this ladder."
+    ? `Click the keys. Space moves to the next word.${restart} The keyboard does not type on this ladder.`
     : state.mode === "mobile"
-      ? "Tap the sentence, or Tap to type, if the phone keyboard is closed."
-      : "Type the line. Backspace fixes a miss.";
+      ? `Tap the sentence, or Tap to type, if the phone keyboard is closed. Space moves to the next word.${restart}`
+      : `Type the line. A miss can stay, or Backspace can correct it. Space moves to the next word.${restart}`;
   box.append(h("p", { id: "race-hint", class: "hint", text: hint }));
+  if (state.localPractice) {
+    box.append(h("button", {
+      id: "restart-test",
+      class: "btn restart-test",
+      type: "button",
+      text: "Restart test",
+      onclick: restartTest,
+    }));
+  }
   if (state.mode === "cursor") box.append(keyboard());
   box.append(h("p", { class: "locked", id: "locked", hidden: true, text: "Locked in. Waiting for the rest of the room." }));
   box.append(h("p", { class: "hint", id: "race-note", hidden: true }));
@@ -1360,13 +1364,15 @@ function paintPassage() {
   box.replaceChildren();
   for (let i = 0; i < sentence.length; i += 1) {
     const className = characterClass(sentence, typed, i);
-    const span = h("span", { class: className.includes("bad") ? `${className} blocked` : className });
+    const span = h("span", { class: className });
     span.append(document.createTextNode(characterText(sentence, typed, i)));
     const miss = typedMiss(sentence, typed, i);
     if (miss) {
       const label = missLabel(miss);
       span.setAttribute("title", `Typed ${label}`);
       span.append(h("span", { class: "visually-hidden", text: `, typed ${label}` }));
+    } else if (typed[i] === MISSED) {
+      span.append(h("span", { class: "visually-hidden", text: ", missed" }));
     }
     box.append(span);
   }
@@ -1377,7 +1383,7 @@ function paintStats() {
   if (!node) return;
   const waiting = Boolean(state.daily && !state.daily.clock);
   const elapsed = waiting ? 0 : serverNow() - state.startAt;
-  const correct = correctLength(state.typed, state.sentence);
+  const correct = matchCount(state.typed, state.sentence);
   const started = (state.phase === "race" || state.phase === "finishing") && !waiting;
   if (started && elapsed >= 0) {
     liveTrack = stepLiveTrack(liveTrack, { elapsedMs: elapsed, correctChars: correct });
@@ -1399,13 +1405,6 @@ function paintStats() {
   if (wpmNode) wpmNode.textContent = model.wpmText;
   if (accNode) accNode.textContent = model.accuracyText;
   if (timeNode) timeNode.textContent = model.clockText;
-  const hint = document.getElementById("fix-hint");
-  if (hint) {
-    const show = Boolean(model.blocked);
-    hint.classList.toggle("is-quiet", !show);
-    if (show) hint.removeAttribute("aria-hidden");
-    else hint.setAttribute("aria-hidden", "true");
-  }
 }
 
 function paintLocked() {
@@ -1667,7 +1666,7 @@ function commitTyping(effect) {
   let armDailyClock = false;
   for (const step of steps) {
     state.typed = step.text;
-    if (step.kind === "fin") state.phase = "finishing";
+    if (step.kind === "fin" || (step.reached && state.localPractice)) state.phase = "finishing";
     if (state.daily && !state.daily.practice) noteDailyStep(state.daily.steps, step.text, DAILY_MAX_STEPS);
     if (state.daily && !state.daily.clock && state.typed) armDailyClock = true;
     publish(step.kind, step.text);
@@ -1712,7 +1711,7 @@ function applyServerText(msg) {
 function localLane() {
   const mine = state.live.find((row) => row.id === selfId());
   if (!mine) return;
-  mine.i = correctLength(state.typed, state.sentence);
+  mine.i = state.typed.length;
   mine.wpm = currentWpm();
   if (state.phase === "finishing") mine.finishedAt = mine.finishedAt || serverNow();
   noteHumanTrace();
@@ -2523,7 +2522,13 @@ function absorbHello(msg) {
     };
   });
   const mine = myLive();
-  if (mine && state.typed.length < mine.i) {
+  if (msg.you && typeof msg.you.text === "string") {
+    if (msg.you.text.length > state.typed.length) {
+      state.typed = msg.you.text;
+      state.ok = Number(msg.you.ok) || 0;
+      state.err = Number(msg.you.err) || 0;
+    }
+  } else if (mine && state.typed.length < mine.i) {
     state.typed = msg.sentence.slice(0, mine.i);
     state.ok = mine.ok;
     state.err = mine.err;
@@ -2758,6 +2763,14 @@ function resumeRace() {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && canRestartTest()) {
+    const button = document.getElementById("restart-test");
+    if (button && document.activeElement !== button) {
+      event.preventDefault();
+      button.focus();
+      return;
+    }
+  }
   if (state.forfeitConfirm || racedOut()) return;
   const active = state.phase === "race" || state.phase === "countdown";
   const target = event.target;
@@ -3209,7 +3222,7 @@ function changeBot() {
 function noteHumanTrace() {
   if (!state.localPractice) return;
   const elapsed = Math.max(0, serverNow() - state.startAt);
-  const index = correctLength(state.typed, state.sentence);
+  const index = state.typed.length;
   state.trace = noteSample(state.trace, elapsed, index);
 }
 
@@ -3303,6 +3316,37 @@ function tickDaily() {
   }
   const node = document.getElementById("daily-countdown");
   if (node) node.textContent = countdownText(now, board.nextDayAt);
+}
+
+function canRestartTest() {
+  return Boolean(state.localPractice) && (state.phase === "race" || state.phase === "countdown") && !state.forfeitConfirm;
+}
+
+let restarting = false;
+
+async function restartTest() {
+  if (!canRestartTest() || restarting) return;
+  restarting = true;
+  try {
+    if (state.daily) {
+      const daily = state.daily;
+      await beginDaily({
+        practice: Boolean(daily.practice),
+        passage: daily.practice ? state.sentence : "",
+        passageId: daily.practice ? state.passageId : "",
+        day: daily.day,
+        difficulty: daily.difficulty,
+      });
+      return;
+    }
+    if (state.versus) {
+      beginVersus({ same: true, kind: state.versus.kind });
+      return;
+    }
+    beginSolo({ same: true, format: state.format });
+  } finally {
+    restarting = false;
+  }
 }
 
 async function beginDaily(options = {}) {
@@ -3481,6 +3525,7 @@ function finishDailyRace() {
     mode: state.mode,
     length: "set",
     passageId: state.passageId,
+    chars: matchCount(state.typed, state.sentence),
   });
   state.soloRun = run;
   const daily = state.daily;
@@ -3556,6 +3601,7 @@ function finishSolo() {
     length: state.length,
     passageId: state.passageId,
     format: punctuation ? "punctuation" : "passage",
+    chars: matchCount(state.typed, state.sentence),
   });
   run.opponent = state.versus?.kind === "bot" || state.versus?.kind === "ghost" ? state.versus.kind : "";
   state.soloRun = run;

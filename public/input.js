@@ -1,9 +1,13 @@
 // Shared by the page and the unit tests. The page loads this as a module.
 //
-// The race server accepts one UTF-16 code unit added or removed per message.
-// These helpers stay on that step size. NFC is applied to the incoming text
-// and to the passage before they are compared, so a composed accent and its
-// decomposed form count as the same character.
+// The race server accepts one UTF-16 code unit added or removed per message,
+// or one word skip from Space. These helpers stay on that step size. NFC is
+// applied to the incoming text and to the passage before they are compared,
+// so a composed accent and its decomposed form count as the same character.
+
+import { MISSED, wordSkipText } from "../src/progress.js";
+
+export { MISSED, matchCount } from "../src/progress.js";
 
 export function nfc(value) {
   return typeof value === "string" ? value.normalize("NFC") : "";
@@ -162,24 +166,43 @@ export function applyTyping(state, effect) {
   const steps = [];
   for (const ch of effect.chars || []) {
     if (ch.length !== 1) break;
-    const good = correctLength(current, sentence);
-    if (current.length > good || good >= target.length) break;
-    const expected = target[good];
+    if (current.length >= target.length) break;
+    const skip = ch === " " ? wordSkipText(target, current) : null;
+    if (skip) {
+      for (const unit of skip.slice(current.length)) {
+        if (unit === MISSED) nextErr += 1;
+        else nextOk += 1;
+      }
+      current = skip;
+      steps.push(stepFor(current, target));
+      break;
+    }
+    // A letter does not spill into the next word. Space is what moves on.
+    if (target[current.length] === " " && ch !== " ") break;
+    const expected = target[current.length];
     current += ch;
-    const match = ch === expected;
-    if (match) nextOk += 1;
+    if (ch === expected) nextOk += 1;
     else nextErr += 1;
-    const finished = current === sentence;
-    steps.push({ kind: finished ? "fin" : "prog", text: current });
-    if (!match || finished) break;
+    steps.push(stepFor(current, target));
+    if (current === target) break;
   }
   if (!steps.length) return idle;
+  const last = steps[steps.length - 1];
   return {
     typed: current,
     ok: nextOk,
     err: nextErr,
     changed: true,
-    finished: steps[steps.length - 1].kind === "fin",
+    finished: last.kind === "fin",
+    reached: last.reached,
     steps,
+  };
+}
+
+function stepFor(current, target) {
+  return {
+    kind: current === target ? "fin" : "prog",
+    text: current,
+    reached: current.length === target.length,
   };
 }

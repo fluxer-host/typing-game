@@ -1,19 +1,16 @@
-import { correctLength } from "./input.js";
+import { MISSED } from "./input.js";
 
 // Maps one passage index to its state class.
-// `expected` is the full sentence and `typed` is the raw input, including a
-// single wrong character when the racer is stopped on a miss.
+// `expected` is the full sentence and `typed` is the raw input. A miss stays
+// marked, and the caret sits on the next untyped character.
 export function characterClass(expected, typed, index) {
   const sentence = typeof expected === "string" ? expected : "";
   const input = typeof typed === "string" ? typed : "";
   const i = Number(index);
   if (!Number.isInteger(i) || i < 0 || i >= sentence.length) return "ch";
-  const good = correctLength(input, sentence);
-  const wrong = input.length > good;
   const names = ["ch"];
-  if (i < good) names.push("ok");
-  else if (wrong && i === good) names.push("bad");
-  if ((!wrong && i === input.length) || (wrong && i === good)) names.push("cur");
+  if (i < input.length) names.push(input[i] === sentence[i] ? "ok" : "bad");
+  if (i === input.length) names.push("cur");
   return names.join(" ");
 }
 
@@ -33,10 +30,9 @@ export function typedMiss(expected, typed, index) {
   const sentence = typeof expected === "string" ? expected : "";
   const input = typeof typed === "string" ? typed : "";
   const i = Number(index);
-  if (!Number.isInteger(i) || i < 0 || i >= sentence.length) return "";
-  const good = correctLength(input, sentence);
-  if (input.length > good && i === good) return input[good] || "";
-  return "";
+  if (!Number.isInteger(i) || i < 0 || i >= sentence.length || i >= input.length) return "";
+  if (input[i] === sentence[i] || input[i] === MISSED) return "";
+  return input[i];
 }
 
 export function missLabel(ch) {

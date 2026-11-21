@@ -8,7 +8,7 @@ import { buildResults, countsAsWin } from "../src/results.js";
 import { accuracy, wpm } from "../src/score.js";
 import { readPayload, signPayload } from "../src/session.js";
 import { LENGTHS, lengthList } from "../src/lengths.js";
-import { validateProgress } from "../src/progress.js";
+import { MISSED, validateProgress, wordSkipText } from "../src/progress.js";
 import { rankedFor, summarizeRooms } from "../src/lobby.js";
 import {
   MATCH_WINDOW_CAP,
@@ -265,6 +265,36 @@ test("verified typing accepts one character at a time and counts mistakes", () =
   assert.equal(back.index, 1);
   assert.equal(back.okDelta, 0);
   assert.equal(back.errDelta, 0);
+
+  const hello = "hello world";
+  const skip = wordSkipText(hello, "he");
+  assert.equal(skip, `he${MISSED}${MISSED}${MISSED} `);
+  const jumped = validateProgress({
+    passage: hello,
+    previous: "he",
+    next: skip,
+    elapsedMs: 500,
+    recentStrokes: 0,
+    priorStrokes: 2,
+    kind: "prog",
+  });
+  assert.equal(jumped.ok, true);
+  assert.equal(jumped.errDelta, 3);
+  assert.equal(jumped.okDelta, 1);
+  assert.equal(jumped.finished, false);
+  assert.equal(jumped.index, 2);
+  const copied = validateProgress({
+    passage: hello,
+    previous: "he",
+    next: "hello ",
+    elapsedMs: 500,
+    recentStrokes: 0,
+    priorStrokes: 2,
+    kind: "prog",
+  });
+  assert.equal(copied.ok, false);
+  assert.equal(copied.reason, "jump");
+  assert.equal(copied.disqualify, true);
 });
 
 test("an instant finish, a jump, and an overshoot are disqualified", () => {
@@ -818,36 +848,43 @@ function legacyCorrectLength(typed, sentence) {
   return index;
 }
 
-test("typed text grows by one character and stops on a mismatch", () => {
-  const sentence = "I love Fluxer";
+test("typed text grows by one character and a miss does not stop the line", () => {
+  const sentence = "love Fluxer";
   const first = applyTyping(
     { typed: "", sentence, ok: 0, err: 0 },
-    consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "insertText", data: "I" }).effect,
+    consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "insertText", data: "l" }).effect,
   );
-  assert.equal(first.typed, "I");
+  assert.equal(first.typed, "l");
   assert.equal(first.ok, 1);
   assert.equal(first.err, 0);
   assert.equal(first.steps.length, 1);
   assert.equal(first.steps[0].kind, "prog");
-  assert.equal(first.steps[0].text, "I");
+  assert.equal(first.steps[0].text, "l");
 
   const wrong = applyTyping({ ...first, sentence }, { effect: "insert", chars: ["x"] });
-  assert.equal(wrong.typed, "Ix");
+  assert.equal(wrong.typed, "lx");
   assert.equal(wrong.ok, 1);
   assert.equal(wrong.err, 1);
-  const stopped = applyTyping({ ...wrong, sentence }, { effect: "insert", chars: ["l"] });
-  assert.equal(stopped.typed, "Ix");
-  assert.equal(stopped.changed, false);
-  assert.equal(stopped.err, 1);
+  const kept = applyTyping({ ...wrong, sentence }, { effect: "insert", chars: ["o"] });
+  assert.equal(kept.typed, "lxo");
+  assert.equal(kept.changed, true);
+  assert.equal(kept.ok, 1);
+  assert.equal(kept.err, 2);
+  const skipped = applyTyping({ typed: "lx", sentence, ok: 1, err: 1 }, { effect: "insert", chars: [" "] });
+  assert.equal(skipped.typed.startsWith("lx"), true);
+  assert.equal(skipped.typed.endsWith(" "), true);
+  assert.equal(skipped.typed.includes("love"), false);
+  assert.ok(skipped.err > 1);
+  assert.equal(skipped.steps.length, 1);
 
   const erased = applyTyping(
     { ...wrong, sentence },
     consumeInput(emptyInputSession(), { type: "beforeinput", inputType: "deleteContentBackward" }).effect,
   );
-  assert.equal(erased.typed, "I");
+  assert.equal(erased.typed, "l");
   assert.equal(erased.ok, 1);
   assert.equal(erased.err, 1);
-  assert.equal(erased.steps[0].text, "I");
+  assert.equal(erased.steps[0].text, "l");
 
   const word = applyTyping(
     { typed: "hello", sentence: "hello", ok: 5, err: 0 },

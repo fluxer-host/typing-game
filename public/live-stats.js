@@ -2,7 +2,6 @@
 // using wpm() and accuracy() from src/score.js.
 
 import { accuracy } from "../src/score.js";
-import { correctLength } from "./input.js";
 
 export const LIVE_WARMUP_MS = 3000;
 export const LIVE_WARMUP_CHARS = 10;
@@ -12,7 +11,6 @@ export const LIVE_WINDOW_WEIGHT = 0.45;
 export const LIVE_RESUME_GAP_MS = 2000;
 export const LIVE_DASH = "\u2014";
 export const LIVE_WARMING_TEXT = "Warming up";
-export const LIVE_FIX_HINT = "Fix the error with Backspace";
 
 export function emptyLiveTrack() {
   return { samples: [], anchorMs: null, anchorChars: 0 };
@@ -72,14 +70,6 @@ function rollingRate(samples, now) {
   return { rate: delta <= 0 ? 0 : rawRate(delta, span), span };
 }
 
-export function typingBlocked(typed, sentence) {
-  const target = typeof sentence === "string" ? sentence : "";
-  const input = typeof typed === "string" ? typed : "";
-  if (!target) return false;
-  const good = correctLength(input, target);
-  return input.length > good && good < target.length;
-}
-
 export function liveStatsModel({
   elapsedMs = 0,
   correctChars = 0,
@@ -95,12 +85,9 @@ export function liveStatsModel({
   const good = Number.isFinite(Number(ok)) && Number(ok) > 0 ? Number(ok) : 0;
   const bad = Number.isFinite(Number(err)) && Number(err) > 0 ? Number(err) : 0;
   const keystrokes = good + bad;
-  const blocked = started && typingBlocked(typed, sentence);
   const clockText = !started || elapsed < 0 ? "ready" : `${(Math.max(0, elapsed) / 1000).toFixed(1)}s`;
   const base = {
     clockText,
-    blocked,
-    hint: blocked ? LIVE_FIX_HINT : "",
     wpmValue: null,
     accuracyValue: null,
   };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { MISSED, wordSkipText } from "../src/progress.js";
 import { wpm } from "../src/score.js";
 import { poolFor } from "../src/sentences.js";
 import {
@@ -226,7 +227,9 @@ test("replay uses the server elapsed time and rejects forged finishes", () => {
   assert.equal(dumped.reason, "jump");
 
   const wrong = replayDaily({ passage, steps: ["a", "ab", "abc", "abcx"], elapsedMs: 10_000 });
-  assert.equal(wrong.reason, "unfinished");
+  assert.equal(wrong.ok, true);
+  assert.equal(wrong.wpm, wpm(3, 10_000));
+  assert.ok(wrong.accuracy < 100);
 
   const missed = replayDaily({ passage: "ab", steps: ["x", "", "a", "ab"], elapsedMs: 200 });
   assert.equal(missed.ok, true);
@@ -237,6 +240,20 @@ test("replay uses the server elapsed time and rejects forged finishes", () => {
   assert.equal(clean.ok, true);
   assert.equal(clean.wpm, wpm(passage.length, 10_000));
   assert.equal(clean.accuracy, 100);
+
+  const quote = "ab cd";
+  const skip = wordSkipText(quote, "a");
+  assert.equal(skip, `a${MISSED} `);
+  const moved = replayDaily({
+    passage: quote,
+    steps: ["a", skip, `${skip}c`, `${skip}cd`],
+    elapsedMs: 10_000,
+  });
+  assert.equal(moved.ok, true);
+  assert.equal(moved.wpm, wpm(4, 10_000));
+  assert.ok(moved.accuracy < 100);
+  const copied = replayDaily({ passage: quote, steps: ["ab "], elapsedMs: 10_000 });
+  assert.equal(copied.reason, "jump");
 });
 
 test("the first completed attempt is the score and a used attempt is rejected", async () => {

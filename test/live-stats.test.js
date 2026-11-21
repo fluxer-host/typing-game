@@ -4,13 +4,11 @@ import test from "node:test";
 import { accuracy, wpm } from "../src/score.js";
 import {
   LIVE_DASH,
-  LIVE_FIX_HINT,
   LIVE_WARMING_TEXT,
   emptyLiveTrack,
   liveStatsModel,
   officialResultNote,
   stepLiveTrack,
-  typingBlocked,
 } from "../public/live-stats.js";
 
 const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
@@ -132,13 +130,11 @@ test("a pause lowers the live pace and a backspace cannot make it negative", () 
   assert.ok(undone.wpmValue >= 0);
   assert.ok(undone.wpmValue < 60, String(undone.wpmValue));
   assert.equal(undone.accuracyText, `${accuracy(20, 0)}%`);
-  assert.equal(undone.blocked, false);
 });
 
 test("accuracy is blank before input and stays on the keystroke count after a miss", () => {
   const clean = liveStatsModel({ elapsedMs: 200, correctChars: 0, ok: 0, err: 0, started: true });
   assert.equal(clean.accuracyText, LIVE_DASH);
-  assert.equal(clean.blocked, false);
   const missed = liveStatsModel({
     elapsedMs: 800,
     correctChars: 3,
@@ -155,10 +151,6 @@ test("accuracy is blank before input and stays on the keystroke count after a mi
   assert.equal(missed.phase, "warming");
   assert.equal(missed.accuracyValue, accuracy(3, 1));
   assert.equal(missed.accuracyText, "75%");
-  assert.equal(missed.blocked, true);
-  assert.equal(missed.hint, LIVE_FIX_HINT);
-  assert.equal(typingBlocked("hel", "hello"), false);
-  assert.equal(typingBlocked("helo", "hello"), true);
 });
 
 test("a reload mid-race warms up again instead of inventing a spike", () => {

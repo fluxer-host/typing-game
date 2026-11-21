@@ -1,4 +1,5 @@
 import { applyElo, eloDeltas } from "./elo.js";
+import { matchCount } from "./progress.js";
 import { accuracy, wpm } from "./score.js";
 import { buildTimedResults } from "./timed.js";
 
@@ -22,11 +23,13 @@ export function countsAsWin(row) {
 function ordered(state) {
   const rows = state.players.map((player) => {
     const finish = state.finishes[player.id];
-    const progress = state.progress[player.id] || { i: 0, ok: 0, err: 0 };
+    const progress = state.progress[player.id] || { i: 0, ok: 0, err: 0, text: "" };
     const presence = presenceOf(state, player.id);
     const dq = Boolean(progress.dq);
     const finished = Boolean(finish) && !dq && !presence.forfeit && presence.dnfReason !== "idle" && presence.dnfReason !== "disconnect";
     const forfeitWin = Boolean(presence.forfeitWin) && !finished;
+    const hasText = typeof progress.text === "string";
+    const matched = hasText ? matchCount(progress.text, state.sentence || "") : (progress.i || 0);
     return {
       player,
       dq,
@@ -34,7 +37,7 @@ function ordered(state) {
       forfeitWin,
       outcome: outcomeFor({ ...presence, forfeitWin }, finished),
       at: finished ? finish.at : null,
-      i: finished ? state.sentence.length : progress.i || 0,
+      i: finished ? state.sentence.length : matched,
       ok: (finished ? finish : progress).ok || 0,
       err: (finished ? finish : progress).err || 0,
     };

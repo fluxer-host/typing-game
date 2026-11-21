@@ -68,11 +68,11 @@ export function soloStart({ mode, length, me, now, avoid = [], passageId = "", s
   };
 }
 
-export function soloFinish({ sentence, startAt, now, ok, err, mode, length, passageId, format } = {}) {
+export function soloFinish({ sentence, startAt, now, ok, err, mode, length, passageId, format, chars } = {}) {
   const end = Number.isFinite(Number(now)) ? Number(now) : 0;
   const start = Number.isFinite(Number(startAt)) ? Number(startAt) : end;
   const ms = Math.max(1, end - start);
-  const chars = typeof sentence === "string" ? sentence.length : 0;
+  const counted = Number.isFinite(Number(chars)) ? Number(chars) : (typeof sentence === "string" ? sentence.length : 0);
   const good = Number.isFinite(Number(ok)) ? Number(ok) : 0;
   const bad = Number.isFinite(Number(err)) ? Number(err) : 0;
   const row = {
@@ -80,7 +80,7 @@ export function soloFinish({ sentence, startAt, now, ok, err, mode, length, pass
     mode,
     length,
     passageId: passageId || "",
-    wpm: wpm(chars, ms),
+    wpm: wpm(counted, ms),
     accuracy: accuracy(good, bad),
     ms,
     errors: bad > 0 ? bad : 0,

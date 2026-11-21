@@ -41,11 +41,11 @@ test("contrast ratio follows the WCAG luminance formula", () => {
 test("a wrong key keeps the expected character and marks that one cell", () => {
   const sentence = "The";
   assert.equal(characterText(sentence, "z", 0), "T");
-  assert.equal(characterClass(sentence, "z", 0), "ch bad cur");
+  assert.equal(characterClass(sentence, "z", 0), "ch bad");
   assert.equal(typedMiss(sentence, "z", 0), "z");
   assert.equal(missLabel("z"), "z");
   assert.equal(characterText(sentence, "z", 1), "h");
-  assert.equal(characterClass(sentence, "z", 1), "ch");
+  assert.equal(characterClass(sentence, "z", 1), "ch cur");
   assert.equal(typedMiss(sentence, "z", 1), "");
   assert.equal(characterText(sentence, "z", 2), "e");
   assert.notEqual(characterText(sentence, "z", 0), "z");
