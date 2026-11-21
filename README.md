@@ -1,6 +1,6 @@
 # Typing race
 
-A typing race for Fluxer accounts. Everyone in a match gets the same passage, types it, and the server records who finished first. The site answers on whatever hostname reaches the Worker. The header shows that hostname, so `typing.fluxer.my`, a `workers.dev` host, and local `127.0.0.1:8787` are the same app. The page title stays "Typing race", and adds the current step during a race: countdown, racing, or results.
+A typing race for Fluxer accounts. Everyone in a match gets the same passage, types it, and the server records who finished first. The public address is `https://fluxertype.com/`. The site also answers on whatever hostname reaches the Worker. The header shows that hostname, so `fluxertype.com`, `typing.fluxer.my`, a `workers.dev` host, and local `127.0.0.1:8787` are the same app. The page title stays "Typing race", and adds the current step during a race: countdown, racing, or results.
 
 ## Deploy on Workers, with static assets
 
@@ -10,7 +10,7 @@ Pages can host the HTML, and Pages Functions can run the OAuth routes. The race 
 
 The source site lives in `public/`. `npm run build` (esbuild) writes `dist/`: one minified script and one minified stylesheet, each with a content hash in the filename. Wrangler serves `dist/`. Requests for `/api/*`, `/auth/*`, `/ws`, and `/index.html` run the Worker first. `/index.html` answers 301 to `/`. Everything else is an asset. Hashed files under `/a/` are cached for a year. HTML is `no-cache`, so the next visit picks up a new hash.
 
-Attach any hostname whose zone is on the same Cloudflare account. `typing.fluxer.my` is one example. The Worker does not contain that name.
+Attach any hostname whose zone is on the same Cloudflare account. The public address is `fluxertype.com`. `typing.fluxer.my` stays attached so older links still open. The Worker code does not branch on the name.
 
 ## What a match does
 
@@ -59,7 +59,8 @@ Register each public origin's callback exactly. Fluxer compares them byte for by
 
 The Worker builds the callback from the host the browser called, plus `/auth/callback`, unless `FLUXER_REDIRECT_URI` is set. Leave that secret unset when more than one hostname should be able to sign in. Set it only when every login should return to one host. Examples:
 
-- `https://typing.fluxer.my/auth/callback`
+- `https://fluxertype.com/auth/callback`
+- `https://typing.fluxer.my/auth/callback` while that host stays attached
 - `http://127.0.0.1:8787/auth/callback` if you want to try OAuth locally
 
 The site asks only for the `identify` scope. It stores the refresh token so sign-out can revoke the grant. Access tokens last 7 days, refresh tokens 30 days. The refresh token is encrypted with AES-GCM before it is written. The key is `TOKEN_ENCRYPTION_KEY`, a Worker secret, not the Fluxer client secret and not `SESSION_SECRET`. Generate it with `openssl rand -base64 32` and set it with `npx wrangler secret put TOKEN_ENCRYPTION_KEY`. Put that key in `.dev.vars` for local OAuth. Rows saved before that key existed are plaintext. The next signed-in request re-encrypts them. If the key is missing, a new login still works and the refresh token is not stored, so sign-out cannot revoke that grant.
@@ -104,23 +105,26 @@ Put the same value in `.dev.vars` for local `wrangler dev`. To rotate it, copy t
 
 The Worker cron `17 * * * *` deletes expired session rows in batches of 100, up to 10 batches per run. Finished race objects keep their storage for 2 minutes after the result is saved, then delete it. Rematch records expire after 3 minutes.
 
-Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://typing.fluxer.my/auth/callback`. Leave it unset and the callback follows the host in the address bar.
+Optional: `npx wrangler secret put FLUXER_REDIRECT_URI` when every login must return to one host, such as `https://fluxertype.com/auth/callback`. Leave it unset and the callback follows the host in the address bar. Register `/auth/callback` for each host that stays attached.
 
 ```bash
 npm run deploy
 ```
 
-`npm run deploy` builds `dist/` and then runs `wrangler deploy`. Link previews and the sitemap use `https://typing.fluxer.my/` as the public address. The Worker still answers on any hostname that reaches it.
+`npm run deploy` builds `dist/` and then runs `wrangler deploy`. Link previews and the sitemap use `https://fluxertype.com/` as the public address. The Worker still answers on any hostname that reaches it.
 
 Replace the `Contact` line in `public/.well-known/security.txt` before the site is public. `mailto:security@example.com` is a placeholder, and that mailbox is not monitored.
 
-In the Cloudflare dashboard, attach the hostname to the `typing-fluxer` Worker. Or add the route once that zone is on the account and deploy again. For `typing.fluxer.my`:
+In the Cloudflare dashboard, attach the hostname to the `typing-fluxer` Worker. Or add the route once that zone is on the account and deploy again. The public host is `fluxertype.com`. `typing.fluxer.my` stays on the Worker:
 
 ```jsonc
-"routes": [{ "pattern": "typing.fluxer.my", "custom_domain": true }]
+"routes": [
+  { "pattern": "fluxertype.com", "custom_domain": true },
+  { "pattern": "typing.fluxer.my", "custom_domain": true }
+]
 ```
 
-Another hostname is the same line with that name. Each one you sign in from also needs its `/auth/callback` on the Fluxer application.
+Each host you sign in from also needs its `/auth/callback` on the Fluxer application.
 
 Do not set `ALLOW_DEV_LOGIN` to `true` in the deployed vars.
 

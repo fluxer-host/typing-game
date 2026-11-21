@@ -4,4 +4,4 @@ Disallow: /api/
 Disallow: /auth/
 Disallow: /ws
 
-Sitemap: https://typing.fluxer.my/sitemap.xml
+Sitemap: https://fluxertype.com/sitemap.xml

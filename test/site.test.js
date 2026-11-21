@@ -47,20 +47,20 @@ test("the built home page has the sharing tags", () => {
   const required = [
     "<title>Typing race</title>",
     'name="description" content="Race other Fluxer users on the same sentence. Desktop, mobile, and mouse-only cursor ladders."',
-    'rel="canonical" href="https://typing.fluxer.my/"',
+    'rel="canonical" href="https://fluxertype.com/"',
     'name="theme-color" content="#0e0e12"',
     'property="og:title" content="Typing race"',
     'property="og:description"',
     'property="og:type" content="website"',
-    'property="og:url" content="https://typing.fluxer.my/"',
-    'property="og:image" content="https://typing.fluxer.my/og.png"',
+    'property="og:url" content="https://fluxertype.com/"',
+    'property="og:image" content="https://fluxertype.com/og.png"',
     'property="og:image:width" content="1200"',
     'property="og:image:height" content="630"',
     'property="og:image:alt" content="Purple rounded square with a white wave and a white caret, the Typing race mark."',
     'name="twitter:card" content="summary_large_image"',
     'name="twitter:title" content="Typing race"',
     'name="twitter:description"',
-    'name="twitter:image" content="https://typing.fluxer.my/og.png"',
+    'name="twitter:image" content="https://fluxertype.com/og.png"',
     'name="twitter:image:alt"',
     'rel="apple-touch-icon" href="/apple-touch-icon.png"',
     'rel="manifest" href="/manifest.webmanifest"',
@@ -88,14 +88,15 @@ test("the manifest, robots file, and sitemap describe the public site", () => {
   assert.match(robots, /^Disallow: \/api\/$/m);
   assert.match(robots, /^Disallow: \/auth\/$/m);
   assert.match(robots, /^Disallow: \/ws$/m);
-  assert.match(robots, /^Sitemap: https:\/\/typing\.fluxer\.my\/sitemap\.xml$/m);
+  assert.match(robots, /^Sitemap: https:\/\/fluxertype\.com\/sitemap\.xml$/m);
 
   const sitemap = readDist("sitemap.xml");
-  assert.match(sitemap, /<loc>https:\/\/typing\.fluxer\.my\/<\/loc>/);
+  assert.match(sitemap, /<loc>https:\/\/fluxertype\.com\/<\/loc>/);
   assert.equal(sitemap.includes("/api/"), false);
 
   const security = readDist(".well-known/security.txt");
   assert.match(security, /^Contact: mailto:security@fluxer.host$/m);
+  assert.match(security, /^Canonical: https:\/\/fluxertype\.com\/\.well-known\/security\.txt$/m);
   assert.match(security, /Replace Contact/);
   assert.match(security, /^Expires: 2027-10-17T00:00:00\.000Z$/m);
 });

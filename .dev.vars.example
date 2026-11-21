@@ -16,4 +16,4 @@ ALLOW_DEV_LOGIN=true
 # the host in the browser. Set it only to force one callback.
 # FLUXER_CLIENT_ID=
 # FLUXER_CLIENT_SECRET=
-# FLUXER_REDIRECT_URI=https://typing.fluxer.my/auth/callback
+# FLUXER_REDIRECT_URI=https://fluxertype.com/auth/callback

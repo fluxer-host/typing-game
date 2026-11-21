@@ -34,7 +34,10 @@
     "MEDIA_BASE": "https://fluxerusercontent.com",
     "STATIC_CDN": "https://fluxerstatic.com"
   },
-  "routes": [{ "pattern": "typing.fluxer.my", "custom_domain": true }],
+  "routes": [
+    { "pattern": "fluxertype.com", "custom_domain": true },
+    { "pattern": "typing.fluxer.my", "custom_domain": true }
+  ],
   "triggers": {
     "crons": ["17 * * * *"]
   }
