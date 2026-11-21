@@ -3,10 +3,11 @@
 import {
   DAILY_CACHE_SECONDS,
   DAILY_MAX_BODY_CHARS,
+  parseAttemptBody,
   parseDailyQuery,
   parseSubmitBody,
 } from "./daily.js";
-import { loadDailyBoard, startDailyAttempt, submitDailyAttempt } from "./daily-store.js";
+import { loadDailyBoard, markDailyFirstInput, startDailyAttempt, submitDailyAttempt } from "./daily-store.js";
 import { json, sameOrigin } from "./http.js";
 import { resolveUser } from "./identity.js";
 import { isMode } from "./modes.js";
@@ -56,6 +57,22 @@ export async function dailyStart(request, env, now = Date.now()) {
   const ladder = body.value?.ladder;
   if (!isMode(ladder)) return json({ error: "ladder" }, { status: 400 });
   const outcome = await startDailyAttempt(env, { user: resolved.user, ladder, now });
+  return json(outcome.body, { status: outcome.status });
+}
+
+export async function dailyInput(request, env, now = Date.now()) {
+  if (!sameOrigin(request)) return json({ error: "origin" }, { status: 403 });
+  const resolved = await resolveUser(request, env);
+  if (!resolved?.user) return json({ error: "unauthorized" }, { status: 401 });
+  const body = await readJson(request, 2_000);
+  if (!body.ok) return json({ error: body.error }, { status: 400 });
+  const parsed = parseAttemptBody(body.value);
+  if (!parsed.ok) return json({ error: parsed.error }, { status: 400 });
+  const outcome = await markDailyFirstInput(env, {
+    user: resolved.user,
+    attemptId: parsed.attemptId,
+    now,
+  });
   return json(outcome.body, { status: outcome.status });
 }
 

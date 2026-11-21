@@ -1,6 +1,6 @@
 import { board, config, health, me, races } from "./api.js";
 import { callback, devLogin, login, logout } from "./auth.js";
-import { dailyBoard, dailyStart, dailySubmit } from "./daily-http.js";
+import { dailyBoard, dailyInput, dailyStart, dailySubmit } from "./daily-http.js";
 import { purgeDaily } from "./daily-store.js";
 import { purgeExpiredSessions } from "./db.js";
 import { json } from "./http.js";
@@ -41,6 +41,7 @@ export default {
       if (request.method === "GET" && path === "/api/leaderboard") return board(request, env);
       if (request.method === "GET" && path === "/api/daily") return dailyBoard(request, env);
       if (request.method === "POST" && path === "/api/daily/start") return dailyStart(request, env);
+      if (request.method === "POST" && path === "/api/daily/input") return dailyInput(request, env);
       if (request.method === "POST" && path === "/api/daily/submit") return dailySubmit(request, env);
       if (request.method === "POST" && path === "/api/share") return shareIssue(request, env);
       if ((request.method === "GET" || request.method === "HEAD") && path.startsWith("/s/")) return shareGet(request, env);

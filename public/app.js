@@ -364,6 +364,7 @@ function serverNow() {
 }
 
 function currentWpm() {
+  if (state.daily && !state.daily.clock) return 0;
   const elapsed = serverNow() - state.startAt;
   if (elapsed < 400) return 0;
   return wpm(correctLength(state.typed, state.sentence), elapsed);
@@ -1374,9 +1375,10 @@ function paintPassage() {
 function paintStats() {
   const node = document.getElementById("stats");
   if (!node) return;
-  const elapsed = serverNow() - state.startAt;
+  const waiting = Boolean(state.daily && !state.daily.clock);
+  const elapsed = waiting ? 0 : serverNow() - state.startAt;
   const correct = correctLength(state.typed, state.sentence);
-  const started = state.phase === "race" || state.phase === "finishing";
+  const started = (state.phase === "race" || state.phase === "finishing") && !waiting;
   if (started && elapsed >= 0) {
     liveTrack = stepLiveTrack(liveTrack, { elapsedMs: elapsed, correctChars: correct });
   }
@@ -1425,11 +1427,12 @@ function paintRaceNote() {
   let text = "";
   if (mine?.status === "timeout" || mine?.status === "disconnect") text = "You timed out.";
   else if (state.daily) {
+    const clock = "The clock starts when you type.";
     text = state.daily.practice
-      ? "Practice. This run does not change today's score."
+      ? `${clock} This run does not change today's score.`
       : state.daily.standing
-        ? "A better finish replaces today's score."
-        : "This finish is the scored attempt for today.";
+        ? `${clock} A better finish replaces today's score.`
+        : `${clock} This finish is the scored attempt for today.`;
   }
   else if (others.some((row) => row.status === "forfeit" || row.status === "disconnect")) text = "Opponent left.";
   else if (others.some((row) => row.status === "timeout")) text = "Opponent timed out.";
@@ -1661,11 +1664,21 @@ function commitTyping(effect) {
   state.ok = result.ok;
   state.err = result.err;
   const steps = state.format === "timed" ? presentTimedSteps(result.steps) : result.steps;
+  let armDailyClock = false;
   for (const step of steps) {
     state.typed = step.text;
     if (step.kind === "fin") state.phase = "finishing";
     if (state.daily && !state.daily.practice) noteDailyStep(state.daily.steps, step.text, DAILY_MAX_STEPS);
+    if (state.daily && !state.daily.clock && state.typed) armDailyClock = true;
     publish(step.kind, step.text);
+  }
+  if (armDailyClock && state.daily) {
+    if (state.daily.practice || !state.daily.attemptId) {
+      state.startAt = serverNow();
+      state.daily.clock = true;
+    } else {
+      stampDailyInput();
+    }
   }
   if (state.localPractice && state.phase === "finishing") {
     if (state.daily) finishDailyRace();
@@ -3304,10 +3317,14 @@ async function beginDaily(options = {}) {
     let difficulty = options.difficulty || board?.difficulty || "";
     let attemptId = null;
     let standing = null;
+    let playAt = serverNow();
     let practice = Boolean(options.practice || state.session !== "in");
     if (!practice) {
       const result = await fetchDaily("/api/daily/start", { ladder });
-      if (Number.isFinite(result.data?.serverNow)) state.dailyOffset = result.data.serverNow - Date.now();
+      if (Number.isFinite(result.data?.serverNow)) {
+        state.dailyOffset = result.data.serverNow - Date.now();
+        state.offset = result.data.serverNow - Date.now();
+      }
       if (result.ok) {
         passage = result.data.passage;
         passageId = result.data.passageId;
@@ -3315,6 +3332,7 @@ async function beginDaily(options = {}) {
         difficulty = result.data.difficulty;
         attemptId = result.data.attemptId;
         standing = result.data.result || null;
+        if (Number.isFinite(Number(result.data.startedAt))) playAt = Number(result.data.startedAt);
         if (board && standing) board.you = standing;
       } else if (result.status === 409 && result.data?.error === "scored") {
         practice = true;
@@ -3337,7 +3355,7 @@ async function beginDaily(options = {}) {
       mode: ladder,
       length: "set",
       me: state.me,
-      now: serverNow(),
+      now: playAt,
       passageId,
       same: true,
     });
@@ -3353,6 +3371,7 @@ async function beginDaily(options = {}) {
       difficulty,
       steps: [],
       pending: false,
+      clock: false,
       scored: false,
       kept: false,
       rejected: false,
@@ -3422,8 +3441,38 @@ function showDailyResults() {
   ensure();
 }
 
+function stampDailyInput() {
+  const daily = state.daily;
+  if (!daily || daily.practice || !daily.attemptId || daily.inputStamp) return daily?.inputStamp || null;
+  daily.inputStamp = fetchDaily("/api/daily/input", { attemptId: daily.attemptId })
+    .then((result) => {
+      if (state.daily !== daily) return;
+      if (result.ok && Number.isFinite(Number(result.data?.firstInputAt))) {
+        state.startAt = Number(result.data.firstInputAt);
+        if (Number.isFinite(Number(result.data.serverNow))) state.offset = Number(result.data.serverNow) - Date.now();
+      }
+      daily.clock = true;
+      paintStats();
+    })
+    .catch(() => {
+      if (state.daily !== daily) return;
+      daily.clock = true;
+      paintStats();
+    });
+  return daily.inputStamp;
+}
+
 function finishDailyRace() {
   if (!state.localPractice || state.soloSaved || !state.daily) return;
+  if (state.daily.inputStamp && !state.daily.clock) {
+    state.soloSaved = true;
+    state.daily.inputStamp.finally(() => {
+      if (!state.daily) return;
+      state.soloSaved = false;
+      finishDailyRace();
+    });
+    return;
+  }
   state.soloSaved = true;
   const run = soloFinish({
     sentence: state.sentence,

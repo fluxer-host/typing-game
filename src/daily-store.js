@@ -11,6 +11,7 @@ import {
   DAILY_RESULT_RETENTION_DAYS,
   DAILY_STARTS_PER_DAY,
   dailyPassage,
+  dailyScoreElapsed,
   isUniqueViolation,
   passageForAttempt,
   replayDaily,
@@ -42,7 +43,7 @@ export async function insertDailyAttempt(env, row) {
 
 export async function getDailyAttempt(env, id) {
   return env.DB.prepare(
-    `SELECT id, user_id, ladder, day, passage_id, started_at, consumed_at, created_at
+    `SELECT id, user_id, ladder, day, passage_id, started_at, consumed_at, created_at, first_input_at
      FROM daily_attempts WHERE id = ?`,
   ).bind(id).first();
 }
@@ -195,6 +196,30 @@ export async function startDailyAttempt(env, { user, ladder, now }) {
   return { status: 200, body };
 }
 
+export async function markDailyFirstInput(env, { user, attemptId, now }) {
+  const attempt = await getDailyAttempt(env, attemptId);
+  if (!attempt || attempt.user_id !== user.id) return { status: 404, body: { error: "attempt" } };
+  if (attempt.consumed_at != null) return { status: 409, body: { error: "used" } };
+  const window = submissionWindow({ startedAt: Number(attempt.started_at), now });
+  if (!window.ok) {
+    const status = window.reason === "expired" ? 409 : 400;
+    return { status, body: { error: window.reason === "expired" ? "expired" : "rejected", reason: window.reason } };
+  }
+  const existing = Number(attempt.first_input_at);
+  if (Number.isFinite(existing) && existing > 0) {
+    return { status: 200, body: { firstInputAt: existing, serverNow: now } };
+  }
+  const result = await env.DB.prepare(
+    `UPDATE daily_attempts SET first_input_at = ?
+     WHERE id = ? AND user_id = ? AND consumed_at IS NULL AND first_input_at IS NULL`,
+  ).bind(now, attemptId, user.id).run();
+  if (changes(result) === 1) return { status: 200, body: { firstInputAt: now, serverNow: now } };
+  const again = await getDailyAttempt(env, attemptId);
+  const stamp = Number(again?.first_input_at);
+  if (Number.isFinite(stamp) && stamp > 0) return { status: 200, body: { firstInputAt: stamp, serverNow: now } };
+  return { status: 409, body: { error: "used" } };
+}
+
 export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
   const attempt = await getDailyAttempt(env, attemptId);
   if (!attempt || attempt.user_id !== user.id) return { status: 404, body: { error: "attempt" } };
@@ -206,7 +231,12 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
   }
   const record = passageForAttempt(attempt.ladder, attempt.passage_id);
   if (!record) return { status: 400, body: { error: "passage" } };
-  const replay = replayDaily({ passage: record.text, steps, elapsedMs: window.elapsedMs });
+  const elapsedMs = dailyScoreElapsed({
+    startedAt: Number(attempt.started_at),
+    firstInputAt: attempt.first_input_at,
+    now,
+  }) ?? window.elapsedMs;
+  const replay = replayDaily({ passage: record.text, steps, elapsedMs });
   if (!replay.ok) {
     console.log(JSON.stringify({
       event: "daily_rejected",
@@ -225,7 +255,7 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
     passageId: record.id,
     wpm: replay.wpm,
     accuracy: replay.accuracy,
-    durationMs: window.elapsedMs,
+    durationMs: elapsedMs,
     startedAt: Number(attempt.started_at),
     finishedAt: now,
     createdAt: now,

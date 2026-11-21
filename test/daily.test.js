@@ -10,6 +10,7 @@ import {
   DAILY_MAX_STEPS,
   DAILY_STARTS_PER_DAY,
   dailyPassage,
+  dailyScoreElapsed,
   dayAllowed,
   isBetterDailyScore,
   isUniqueViolation,
@@ -30,6 +31,7 @@ import {
   insertDailyAttempt,
   insertDailyResult,
   loadDailyBoard,
+  markDailyFirstInput,
   purgeDaily,
   replaceDailyResult,
   startDailyAttempt,
@@ -46,6 +48,7 @@ import {
 
 const INIT = readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8");
 const DAILY_SQL = readFileSync(new URL("../migrations/0002_daily.sql", import.meta.url), "utf8");
+const FIRST_SQL = readFileSync(new URL("../migrations/0004_daily_first_input.sql", import.meta.url), "utf8");
 const DAY_MS = 86_400_000;
 const SECRET = "test-session-secret";
 
@@ -53,6 +56,7 @@ function sqliteEnv() {
   const db = new DatabaseSync(":memory:");
   db.exec(INIT);
   db.exec(DAILY_SQL);
+  db.exec(FIRST_SQL);
   const env = {
     DB: {
       prepare(sql) {
@@ -342,6 +346,61 @@ test("a better daily finish replaces the score and a slower or equal finish leav
   assert.equal(worse.body.improved, false);
   assert.equal(worse.body.wpm, fast.body.wpm);
   assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, fastNow);
+});
+
+test("the daily clock starts at the first key and the attempt still expires from Play", async () => {
+  assert.equal(dailyScoreElapsed({ startedAt: 1_000, firstInputAt: 4_000, now: 9_000 }), 5_000);
+  assert.equal(dailyScoreElapsed({ startedAt: 1_000, firstInputAt: null, now: 9_000 }), 8_000);
+  assert.equal(dailyScoreElapsed({ startedAt: 1_000, firstInputAt: 500, now: 9_000 }), 8_000);
+  assert.equal(dailyScoreElapsed({ startedAt: 1_000, firstInputAt: 9_500, now: 9_000 }), 8_000);
+
+  const { env, db } = sqliteEnv();
+  const user = { id: "ada", username: "ada", global_name: "Ada" };
+  await addUser(env, user.id, { globalName: "Ada" });
+  const startedAt = Date.parse("2026-10-18T12:00:00.000Z");
+  const started = await startDailyAttempt(env, { user, ladder: "desktop", now: startedAt });
+  const steps = stepsForPassage(started.body.passage);
+  const typedMs = (steps.length - 1) * gap() + 50;
+  const firstAt = startedAt + 20_000;
+  const marked = await markDailyFirstInput(env, { user, attemptId: started.body.attemptId, now: firstAt });
+  assert.equal(marked.status, 200);
+  assert.equal(marked.body.firstInputAt, firstAt);
+  const again = await markDailyFirstInput(env, { user, attemptId: started.body.attemptId, now: firstAt + 5_000 });
+  assert.equal(again.body.firstInputAt, firstAt);
+  const submitted = await submitDailyAttempt(env, {
+    user,
+    attemptId: started.body.attemptId,
+    steps,
+    now: firstAt + typedMs,
+  });
+  assert.equal(submitted.status, 200);
+  assert.equal(submitted.body.improved, true);
+  assert.equal(submitted.body.ms, typedMs);
+  assert.equal(submitted.body.wpm, wpm(started.body.passage.length, typedMs));
+  const row = db.prepare(
+    "SELECT duration_ms, first_input_at FROM daily_results r JOIN daily_attempts a ON a.user_id = r.user_id AND a.ladder = r.ladder AND a.day = r.day WHERE a.id = ?",
+  ).get(started.body.attemptId);
+  assert.equal(row.duration_ms, typedMs);
+  assert.equal(row.first_input_at, firstAt);
+
+  const lateStart = await startDailyAttempt(env, { user, ladder: "mobile", now: startedAt });
+  const lateMark = await markDailyFirstInput(env, {
+    user,
+    attemptId: lateStart.body.attemptId,
+    now: startedAt + DAILY_MAX_ATTEMPT_MS - 1_000,
+  });
+  assert.equal(lateMark.status, 200);
+  const expired = await submitDailyAttempt(env, {
+    user,
+    attemptId: lateStart.body.attemptId,
+    steps: stepsForPassage(lateStart.body.passage),
+    now: startedAt + DAILY_MAX_ATTEMPT_MS + 1,
+  });
+  assert.equal(expired.status, 400);
+  assert.equal(expired.body.reason, "duration");
+  const used = await markDailyFirstInput(env, { user, attemptId: started.body.attemptId, now: firstAt + typedMs + 1 });
+  assert.equal(used.status, 409);
+  assert.equal(used.body.error, "used");
 });
 
 test("the stored daily score changes only when the finish is strictly better", async () => {
@@ -833,6 +892,12 @@ test("this browser keeps the first local daily result", () => {
   noteDailyStep(steps, "ab", 2);
   noteDailyStep(steps, "abc", 2);
   assert.deepEqual(steps, ["a", "ab"]);
+});
+
+test("the daily first-key migration adds one nullable column", () => {
+  assert.match(FIRST_SQL, /ALTER TABLE daily_attempts ADD COLUMN first_input_at INTEGER/);
+  assert.doesNotMatch(FIRST_SQL, /DROP TABLE/i);
+  assert.doesNotMatch(FIRST_SQL, /daily_results/);
 });
 
 test("the daily migration adds tables and leaves the account table alone", () => {

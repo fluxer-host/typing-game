@@ -266,12 +266,29 @@ export function shapeDailyRow(input) {
   return row;
 }
 
-export function parseSubmitBody(value) {
+const ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function parseAttemptBody(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, error: "body" };
   const attemptId = value.attemptId;
-  if (typeof attemptId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(attemptId)) {
-    return { ok: false, error: "attempt" };
-  }
+  if (typeof attemptId !== "string" || !ATTEMPT_ID.test(attemptId)) return { ok: false, error: "attempt" };
+  return { ok: true, attemptId };
+}
+
+// Scored time runs from the first key when the server stamped one.
+// Otherwise it runs from Play. A stamp outside the attempt is ignored.
+export function dailyScoreElapsed({ startedAt, firstInputAt, now } = {}) {
+  const start = Number(startedAt);
+  const at = Number(now);
+  if (!Number.isFinite(start) || !Number.isFinite(at) || at < start) return null;
+  const stamped = Number(firstInputAt);
+  if (Number.isFinite(stamped) && stamped >= start && stamped <= at) return at - stamped;
+  return at - start;
+}
+
+export function parseSubmitBody(value) {
+  const attempt = parseAttemptBody(value);
+  if (!attempt.ok) return attempt;
   if (!Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > DAILY_MAX_STEPS) {
     return { ok: false, error: "steps" };
   }
@@ -280,7 +297,7 @@ export function parseSubmitBody(value) {
     if (typeof step !== "string" || step.length > 500) return { ok: false, error: "steps" };
     steps.push(step);
   }
-  return { ok: true, attemptId, steps };
+  return { ok: true, attemptId: attempt.attemptId, steps };
 }
 
 export function strokeGapMs() {
