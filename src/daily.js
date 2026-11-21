@@ -18,7 +18,7 @@ export const DAILY_CARD_LIMIT = 10;
 export const DAILY_CACHE_SECONDS = 30;
 export const DAILY_MAX_STEPS = 800;
 export const DAILY_MAX_BODY_CHARS = 64_000;
-export const DAILY_STARTS_PER_DAY = 12;
+export const DAILY_STARTS_PER_DAY = 36;
 export const DAILY_CLEANUP_BATCH = 100;
 export const DAILY_CLEANUP_ROUNDS = 10;
 
@@ -223,9 +223,25 @@ export function replayDaily({ passage, steps, elapsedMs }) {
   };
 }
 
-export function scoreDecision({ existing, consumed }) {
+// Same order as the daily board: higher words per minute, then accuracy, then a shorter time.
+export function isBetterDailyScore(next, current) {
+  const nextWpm = Number(next?.wpm);
+  const currentWpm = Number(current?.wpm);
+  if (!Number.isFinite(nextWpm) || !Number.isFinite(currentWpm)) return false;
+  if (nextWpm !== currentWpm) return nextWpm > currentWpm;
+  const nextAccuracy = Number(next?.accuracy);
+  const currentAccuracy = Number(current?.accuracy);
+  if (!Number.isFinite(nextAccuracy) || !Number.isFinite(currentAccuracy)) return false;
+  if (nextAccuracy !== currentAccuracy) return nextAccuracy > currentAccuracy;
+  const nextMs = Number(next?.durationMs ?? next?.duration_ms);
+  const currentMs = Number(current?.durationMs ?? current?.duration_ms);
+  if (!Number.isFinite(nextMs) || !Number.isFinite(currentMs)) return false;
+  return nextMs < currentMs;
+}
+
+// A consumed attempt cannot be submitted again. An existing score stays until a better finish replaces it.
+export function scoreDecision({ consumed } = {}) {
   if (consumed) return { ok: false, status: 409, error: "used" };
-  if (existing) return { ok: false, status: 409, error: "scored" };
   return { ok: true, status: 200 };
 }
 

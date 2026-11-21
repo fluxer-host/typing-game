@@ -62,6 +62,38 @@ export async function getDailyResult(env, userId, ladder, day) {
   ).bind(userId, ladder, day).first();
 }
 
+// The WHERE clause matches isBetterDailyScore. An equal or worse finish changes nothing.
+export async function replaceDailyResult(env, row) {
+  const result = await env.DB.prepare(
+    `UPDATE daily_results
+     SET passage_id = ?, wpm = ?, accuracy = ?, duration_ms = ?, started_at = ?, finished_at = ?, created_at = ?
+     WHERE user_id = ? AND ladder = ? AND day = ?
+       AND (
+         wpm < ?
+         OR (wpm = ? AND accuracy < ?)
+         OR (wpm = ? AND accuracy = ? AND duration_ms > ?)
+       )`,
+  ).bind(
+    row.passageId,
+    row.wpm,
+    row.accuracy,
+    row.durationMs,
+    row.startedAt,
+    row.finishedAt,
+    row.createdAt,
+    row.userId,
+    row.ladder,
+    row.day,
+    row.wpm,
+    row.wpm,
+    row.accuracy,
+    row.wpm,
+    row.accuracy,
+    row.durationMs,
+  ).run();
+  return changes(result) === 1;
+}
+
 export async function insertDailyResult(env, row) {
   try {
     await env.DB.prepare(
@@ -132,25 +164,9 @@ export async function startDailyAttempt(env, { user, ladder, now }) {
   const day = utcDayString(now);
   const passage = dailyPassage(ladder, day);
   if (!passage) return { status: 400, body: { error: "passage" } };
-  const existing = await getDailyResult(env, user.id, ladder, day);
-  if (existing) {
-    const rank = await rankDailyResult(env, existing);
-    return {
-      status: 409,
-      body: {
-        error: "scored",
-        passage: passage.text,
-        passageId: passage.id,
-        difficulty: passage.difficulty,
-        length: DAILY_LENGTH,
-        day,
-        serverNow: now,
-        result: publicScore(user, existing, rank, env),
-      },
-    };
-  }
   const starts = await countDailyStarts(env, user.id, ladder, day);
   if (starts >= DAILY_STARTS_PER_DAY) return { status: 429, body: { error: "limit" } };
+  const existing = await getDailyResult(env, user.id, ladder, day);
   const id = crypto.randomUUID();
   await insertDailyAttempt(env, {
     id,
@@ -161,20 +177,22 @@ export async function startDailyAttempt(env, { user, ladder, now }) {
     startedAt: now,
     createdAt: now,
   });
-  return {
-    status: 200,
-    body: {
-      attemptId: id,
-      passage: passage.text,
-      passageId: passage.id,
-      difficulty: passage.difficulty,
-      length: DAILY_LENGTH,
-      ladder,
-      day,
-      serverNow: now,
-      startedAt: now,
-    },
+  const body = {
+    attemptId: id,
+    passage: passage.text,
+    passageId: passage.id,
+    difficulty: passage.difficulty,
+    length: DAILY_LENGTH,
+    ladder,
+    day,
+    serverNow: now,
+    startedAt: now,
   };
+  if (existing) {
+    const rank = await rankDailyResult(env, existing);
+    body.result = publicScore(user, existing, rank, env);
+  }
+  return { status: 200, body };
 }
 
 export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
@@ -185,12 +203,6 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
   if (!window.ok) {
     const status = window.reason === "expired" ? 409 : 400;
     return { status, body: { error: window.reason === "expired" ? "expired" : "rejected", reason: window.reason } };
-  }
-  const existing = await getDailyResult(env, user.id, attempt.ladder, attempt.day);
-  if (existing) {
-    await consumeDailyAttempt(env, attempt.id, user.id, now);
-    const rank = await rankDailyResult(env, existing);
-    return { status: 409, body: { error: "scored", result: publicScore(user, existing, rank, env) } };
   }
   const record = passageForAttempt(attempt.ladder, attempt.passage_id);
   if (!record) return { status: 400, body: { error: "passage" } };
@@ -219,32 +231,25 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
     createdAt: now,
   };
   const inserted = await insertDailyResult(env, stored);
-  const row = inserted.saved
-    ? {
-      ...stored,
-      wpm: stored.wpm,
-      accuracy: stored.accuracy,
-      duration_ms: stored.durationMs,
-      created_at: stored.createdAt,
-      ladder: stored.ladder,
-      day: stored.day,
-    }
-    : await getDailyResult(env, user.id, attempt.ladder, attempt.day);
+  const improved = inserted.saved || await replaceDailyResult(env, stored);
+  const row = await getDailyResult(env, user.id, attempt.ladder, attempt.day);
   const rank = await rankDailyResult(env, row);
-  const body = {
-    saved: inserted.saved,
-    scored: inserted.saved,
-    rank,
-    wpm: row.wpm,
-    accuracy: row.accuracy,
-    ms: row.duration_ms,
-    day: row.day,
-    ladder: row.ladder,
-    serverNow: now,
-    result: publicScore(user, row, rank, env),
+  return {
+    status: 200,
+    body: {
+      saved: improved,
+      scored: improved,
+      improved,
+      rank,
+      wpm: row.wpm,
+      accuracy: row.accuracy,
+      ms: row.duration_ms,
+      day: row.day,
+      ladder: row.ladder,
+      serverNow: now,
+      result: publicScore(user, row, rank, env),
+    },
   };
-  if (!inserted.saved) return { status: 409, body: { error: "scored", ...body } };
-  return { status: 200, body };
 }
 
 function boardUser(row) {

@@ -8,8 +8,10 @@ import {
   DAILY_BOARD_DEFAULT_LIMIT,
   DAILY_MAX_ATTEMPT_MS,
   DAILY_MAX_STEPS,
+  DAILY_STARTS_PER_DAY,
   dailyPassage,
   dayAllowed,
+  isBetterDailyScore,
   isUniqueViolation,
   parseDailyQuery,
   parseSubmitBody,
@@ -29,11 +31,14 @@ import {
   insertDailyResult,
   loadDailyBoard,
   purgeDaily,
+  replaceDailyResult,
   startDailyAttempt,
   submitDailyAttempt,
 } from "../src/daily-store.js";
 import { signPayload } from "../src/session.js";
 import {
+  dailyAnnounce,
+  dailyKeptCopy,
   loadDailyLocal,
   noteDailyStep,
   rememberDailyLocal,
@@ -230,7 +235,7 @@ test("replay uses the server elapsed time and rejects forged finishes", () => {
   assert.equal(clean.accuracy, 100);
 });
 
-test("the first completed attempt is the score and a second one is rejected", async () => {
+test("the first completed attempt is the score and a used attempt is rejected", async () => {
   const { env } = sqliteEnv();
   const user = { id: "ada", username: "ada", global_name: "Ada" };
   await addUser(env, user.id, { globalName: "Ada" });
@@ -239,6 +244,7 @@ test("the first completed attempt is the score and a second one is rejected", as
   assert.equal(first.submitted.status, 200);
   assert.equal(first.submitted.body.saved, true);
   assert.equal(first.submitted.body.scored, true);
+  assert.equal(first.submitted.body.improved, true);
   assert.equal(first.submitted.body.wpm, wpm(first.started.body.passage.length, first.now - startedAt));
   assert.equal(first.submitted.body.result.name, "Ada");
   assert.equal("id" in first.submitted.body.result, false);
@@ -253,14 +259,142 @@ test("the first completed attempt is the score and a second one is rejected", as
   assert.equal(again.body.error, "used");
 
   const retry = await startDailyAttempt(env, { user, ladder: "desktop", now: first.now + 2000 });
-  assert.equal(retry.status, 409);
-  assert.equal(retry.body.error, "scored");
+  assert.equal(retry.status, 200);
   assert.equal(retry.body.result.wpm, first.submitted.body.wpm);
+  assert.equal(retry.body.attemptId === first.started.body.attemptId, false);
 
-  const decision = scoreDecision({ existing: true, consumed: false });
-  assert.equal(decision.status, 409);
-  assert.equal(decision.error, "scored");
-  assert.equal(scoreDecision({ existing: false, consumed: true }).error, "used");
+  assert.equal(scoreDecision({ consumed: false }).status, 200);
+  assert.equal(scoreDecision({ consumed: true }).error, "used");
+});
+
+function storedScore(db, userId, ladder, day) {
+  return db.prepare(
+    "SELECT wpm, accuracy, duration_ms, created_at FROM daily_results WHERE user_id = ? AND ladder = ? AND day = ?",
+  ).get(userId, ladder, day);
+}
+
+test("a better daily finish replaces the score and a slower or equal finish leaves it", async () => {
+  const { env, db } = sqliteEnv();
+  const user = { id: "ada", username: "ada", global_name: "Ada" };
+  await addUser(env, user.id, { globalName: "Ada" });
+  const startedAt = Date.parse("2026-10-18T12:00:00.000Z");
+  const slowStart = await startDailyAttempt(env, { user, ladder: "desktop", now: startedAt });
+  assert.equal(slowStart.status, 200);
+  assert.equal(slowStart.body.result, undefined);
+  const steps = stepsForPassage(slowStart.body.passage);
+  const slowNow = legalNow(startedAt, steps) + 30_000;
+  const slow = await submitDailyAttempt(env, {
+    user,
+    attemptId: slowStart.body.attemptId,
+    steps,
+    now: slowNow,
+  });
+  assert.equal(slow.status, 200);
+  assert.equal(slow.body.improved, true);
+  const standing = storedScore(db, user.id, "desktop", "2026-10-18");
+  assert.equal(standing.wpm, slow.body.wpm);
+  assert.equal(standing.created_at, slowNow);
+
+  const equalAt = slowNow + 1000;
+  const equalStart = await startDailyAttempt(env, { user, ladder: "desktop", now: equalAt });
+  assert.equal(equalStart.status, 200);
+  assert.equal(equalStart.body.result.wpm, slow.body.wpm);
+  const equalNow = equalAt + (slowNow - startedAt);
+  const equal = await submitDailyAttempt(env, {
+    user,
+    attemptId: equalStart.body.attemptId,
+    steps,
+    now: equalNow,
+  });
+  assert.equal(equal.status, 200);
+  assert.equal(equal.body.improved, false);
+  assert.equal(equal.body.saved, false);
+  assert.equal(equal.body.scored, false);
+  assert.equal(equal.body.wpm, slow.body.wpm);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, slowNow);
+
+  const fastAt = equalNow + 1000;
+  const fastStart = await startDailyAttempt(env, { user, ladder: "desktop", now: fastAt });
+  const fastNow = legalNow(fastAt, steps);
+  const fast = await submitDailyAttempt(env, {
+    user,
+    attemptId: fastStart.body.attemptId,
+    steps,
+    now: fastNow,
+  });
+  assert.equal(fast.status, 200);
+  assert.equal(fast.body.improved, true);
+  assert.equal(fast.body.scored, true);
+  assert.ok(fast.body.wpm > slow.body.wpm);
+  const replaced = storedScore(db, user.id, "desktop", "2026-10-18");
+  assert.equal(replaced.wpm, fast.body.wpm);
+  assert.equal(replaced.created_at, fastNow);
+
+  const worseAt = fastNow + 1000;
+  const worseStart = await startDailyAttempt(env, { user, ladder: "desktop", now: worseAt });
+  const worse = await submitDailyAttempt(env, {
+    user,
+    attemptId: worseStart.body.attemptId,
+    steps,
+    now: legalNow(worseAt, steps) + 15_000,
+  });
+  assert.equal(worse.status, 200);
+  assert.equal(worse.body.improved, false);
+  assert.equal(worse.body.wpm, fast.body.wpm);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, fastNow);
+});
+
+test("the stored daily score changes only when the finish is strictly better", async () => {
+  const { env, db } = sqliteEnv();
+  const user = { id: "ada", username: "ada", global_name: "Ada" };
+  await addUser(env, user.id, { globalName: "Ada" });
+  const base = {
+    userId: user.id,
+    ladder: "desktop",
+    day: "2026-10-18",
+    passageId: "p",
+    wpm: 80,
+    accuracy: 99,
+    durationMs: 20_000,
+    startedAt: 1,
+    finishedAt: 20_001,
+    createdAt: 20_001,
+  };
+  assert.equal(isBetterDailyScore({ wpm: 81, accuracy: 1, durationMs: 99_999 }, base), true);
+  assert.equal(isBetterDailyScore({ wpm: 80, accuracy: 100, durationMs: 99_999 }, base), true);
+  assert.equal(isBetterDailyScore({ wpm: 80, accuracy: 99, durationMs: 19_999 }, base), true);
+  assert.equal(isBetterDailyScore({ wpm: 80, accuracy: 99, duration_ms: 19_999 }, { wpm: 80, accuracy: 99, duration_ms: 20_000 }), true);
+  assert.equal(isBetterDailyScore(base, base), false);
+  assert.equal(isBetterDailyScore({ wpm: 79, accuracy: 100, durationMs: 1 }, base), false);
+  assert.equal(isBetterDailyScore({ wpm: 80, accuracy: 98, durationMs: 1 }, base), false);
+  assert.equal(isBetterDailyScore({ wpm: Number.NaN, accuracy: 100, durationMs: 1 }, base), false);
+
+  assert.equal((await insertDailyResult(env, base)).saved, true);
+  const worse = { ...base, wpm: 70, accuracy: 100, durationMs: 1000, finishedAt: 30_000, createdAt: 30_000 };
+  assert.equal(await replaceDailyResult(env, worse), false);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, 20_001);
+
+  const same = { ...base, finishedAt: 40_000, createdAt: 40_000 };
+  assert.equal(await replaceDailyResult(env, same), false);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").wpm, 80);
+
+  const quicker = { ...base, durationMs: 19_000, finishedAt: 50_000, createdAt: 50_000 };
+  assert.equal(await replaceDailyResult(env, quicker), true);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").duration_ms, 19_000);
+
+  const accurate = { ...base, accuracy: 100, durationMs: 25_000, finishedAt: 60_000, createdAt: 60_000 };
+  assert.equal(await replaceDailyResult(env, accurate), true);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").accuracy, 100);
+
+  const slower = { ...accurate, durationMs: 30_000, finishedAt: 70_000, createdAt: 70_000 };
+  assert.equal(await replaceDailyResult(env, slower), false);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, 60_000);
+
+  const faster = { ...base, wpm: 90, accuracy: 50, durationMs: 40_000, finishedAt: 80_000, createdAt: 80_000 };
+  assert.equal(await replaceDailyResult(env, faster), true);
+  const row = storedScore(db, user.id, "desktop", "2026-10-18");
+  assert.equal(row.wpm, 90);
+  assert.equal(row.created_at, 80_000);
 });
 
 test("a unique daily result is returned instead of failing the request", async () => {
@@ -295,8 +429,18 @@ test("a unique daily result is returned instead of failing the request", async (
 
   const startedAt = Date.parse("2026-10-18T12:00:00.000Z");
   const started = await startDailyAttempt(env, { user, ladder: "desktop", now: startedAt });
-  assert.equal(started.status, 409);
+  assert.equal(started.status, 200);
   assert.equal(started.body.result.wpm, 80);
+  const steps = stepsForPassage(started.body.passage);
+  const submitted = await submitDailyAttempt(env, {
+    user,
+    attemptId: started.body.attemptId,
+    steps,
+    now: legalNow(startedAt, steps),
+  });
+  assert.equal(submitted.status, 200);
+  assert.equal(submitted.body.improved, true);
+  assert.ok(submitted.body.wpm > 80);
 });
 
 test("forged, expired, and overlong attempts do not become scores", async () => {
@@ -473,12 +617,12 @@ test("a custom Fluxer picture URL stays on the daily row without an id field", (
   assert.equal(plain.avatar, "https://fluxerstatic.com/avatars/2.png");
 });
 
-test("thirteen starts in one day are limited and old rows are purged", async () => {
+test("starts past the daily cap are limited and old rows are purged", async () => {
   const { env } = sqliteEnv();
   const user = { id: "ada", username: "ada", global_name: "Ada" };
   await addUser(env, user.id, { globalName: "Ada" });
   const now = Date.parse("2026-10-18T12:00:00.000Z");
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < DAILY_STARTS_PER_DAY; i += 1) {
     const started = await startDailyAttempt(env, { user, ladder: "desktop", now: now + i });
     assert.equal(started.status, 200);
   }
@@ -622,6 +766,20 @@ test("a signed-in daily response is private and ignores a forged wpm", async () 
   const board = await listed.json();
   assert.equal(board.you.wpm, saved.wpm);
   assert.equal(JSON.stringify(board).includes(user.id), false);
+});
+
+test("a kept daily finish names the standing score", () => {
+  assert.equal(dailyKeptCopy(81.2), "Today's score stays at 81.2 WPM. This run does not replace it.");
+  const kept = dailyAnnounce({
+    kept: true,
+    standingWpm: 81.2,
+    wpm: 70,
+    accuracy: 100,
+    ms: 12_000,
+    signedIn: true,
+  });
+  assert.match(kept, /Today's score stays at 81\.2 WPM\. This run does not replace it\./);
+  assert.match(kept, /70\.0 words per minute/);
 });
 
 test("this browser keeps the first local daily result", () => {

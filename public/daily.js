@@ -125,11 +125,16 @@ export function dailyMeta(ladder, difficulty, day) {
   return [name, "Set", skill, when].filter(Boolean).join(" · ");
 }
 
-export function dailyAnnounce({ practice, pending, rejected, wpm, accuracy, ms, rank, signedIn }) {
+export function dailyKeptCopy(wpm) {
+  return `Today's score stays at ${Number(wpm).toFixed(1)} WPM. This run does not replace it.`;
+}
+
+export function dailyAnnounce({ practice, pending, rejected, kept, standingWpm, wpm, accuracy, ms, rank, signedIn }) {
   if (pending) return "Saving today's score.";
   const seconds = (Number(ms) / 1000).toFixed(1);
   const pace = `${Number(wpm).toFixed(1)} words per minute, ${Number(accuracy)}% accuracy, ${seconds} seconds`;
   if (rejected) return `Daily challenge. This finish was not saved. ${pace}.`;
+  if (kept) return `Daily challenge. ${dailyKeptCopy(standingWpm)} ${pace}.`;
   if (practice) {
     const tail = signedIn ? " Practice does not change today's score." : " Sign in to submit a score.";
     return `Daily challenge. Practice. ${pace}.${tail}`;

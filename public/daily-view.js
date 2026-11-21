@@ -1,6 +1,6 @@
 // Home card and results for the daily challenge. No inline styles.
 
-const RULE = "The first finish today is the scored attempt. Later runs are practice and stay off the leaderboard. Rating does not change.";
+const RULE = "A better finish replaces today's score. Rating does not change.";
 
 function cell(h, text, header) {
   return h(header ? "th" : "td", header ? { scope: "col", text } : { text });
@@ -115,7 +115,7 @@ export function renderDailyResults(parent, h, view) {
       class: "btn primary",
       type: "button",
       "data-action": "race-again",
-      text: "Try again (practice)",
+      text: view.againLabel || "Try again",
       onclick: view.onAgain,
     }),
     h("button", {
