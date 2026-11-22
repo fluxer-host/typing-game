@@ -19,6 +19,7 @@ export const FORMAT_CHOICES = [
   { id: "timed-60", format: "timed", durationMs: 60000, title: "Timed 60", blurb: "Unranked. 60 seconds." },
   { id: "timed-120", format: "timed", durationMs: 120000, title: "Timed 120", blurb: "Unranked. 120 seconds." },
   { id: "punctuation", format: "punctuation", durationMs: 0, title: "Punctuation", blurb: "Unranked. Marks and capitals." },
+  { id: "chat", format: "chat", durationMs: 0, title: "Chat", blurb: "Unranked. Short IM lines." },
 ];
 
 export function choiceFor(format, durationMs) {
@@ -57,13 +58,23 @@ export function saveFormatChoice(storage, format, durationMs) {
 export function formatLabel(format, durationMs) {
   if (format === "timed") return `Timed ${Math.round(readDurationMs(durationMs) / 1000)}`;
   if (format === "punctuation") return "Punctuation";
+  if (format === "chat") return "Chat";
   return "Passage";
 }
 
 export function formatSummary(format, durationMs, lengthTitle) {
   if (format === "timed") return `${formatLabel(format, durationMs)}s · Unranked`;
   if (format === "punctuation") return `Punctuation · ${lengthTitle} · Unranked`;
+  if (format === "chat") return `Chat · ${lengthTitle} · Unranked`;
   return `${lengthTitle}`;
+}
+
+export function formatQueueNote(format) {
+  if (format === "chat") {
+    return "Chat is unranked. Sprint is 3 messages, Set is 4, and Long is 6. Queue still starts a ranked Passage race.";
+  }
+  if (format === "passage") return "";
+  return "Queue still starts a ranked Passage race on the selected length. Timed, Punctuation, and Chat are unranked, in Practice and private rooms.";
 }
 
 export function appendFormatChoices(parent, h, options) {
@@ -96,7 +107,7 @@ export function appendFormatChoices(parent, h, options) {
     id: "format-queue-note",
     class: "hint",
     hidden: options.format === "passage" ? true : null,
-    text: "Queue still starts a ranked Passage race on the selected length. Timed and Punctuation are unranked, in Practice and private rooms.",
+    text: formatQueueNote(options.format),
   }));
 }
 
@@ -136,6 +147,7 @@ export function resultFormatLine(results) {
     return `Timed ${seconds}s · Unranked. Official result over ${seconds} seconds.`;
   }
   if (results.format === "punctuation") return "Punctuation · Unranked. Official result from the server.";
+  if (results.format === "chat") return "Chat · Unranked. Official result from the server.";
   return "";
 }
 
@@ -181,12 +193,13 @@ export function raceMetaFor(storage, raceId) {
 
 export function bestKey(run) {
   const mode = run?.mode;
-  const format = run?.format === "timed" || run?.format === "punctuation" ? run.format : "passage";
+  const format = run?.format === "timed" || run?.format === "punctuation" || run?.format === "chat" ? run.format : "passage";
   if (format === "timed") {
     const duration = Number(run.durationMs);
     if (duration !== 30000 && duration !== 60000 && duration !== 120000) return "";
     return `${mode}|timed|${duration}`;
   }
   if (format === "punctuation") return `${mode}|punctuation|${run.length}`;
+  if (format === "chat") return `${mode}|chat|${run.length}`;
   return `${mode}|${run.length}`;
 }

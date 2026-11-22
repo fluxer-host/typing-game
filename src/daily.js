@@ -4,9 +4,15 @@
 import { isMode } from "./modes.js";
 import { MAX_KEYSTROKES_PER_SECOND, RATE_WINDOW_MS, matchCount, validateProgress } from "./progress.js";
 import { accuracy, wpm } from "./score.js";
+import { chatById, chatDailyPool } from "./chat.js";
 import { poolFor } from "./sentences.js";
 
 export const DAILY_LENGTH = "set";
+
+// Days before this UTC date keep the prose set. From this day on, the daily
+// passage is a few short chat lines. Scores already saved stay tied to the
+// text people typed.
+export const CHAT_DAILY_FROM = "2026-11-23";
 export const DAILY_MAX_ATTEMPT_MS = 240_000;
 export const DAILY_GRACE_MS = 240_000;
 export const DAILY_RESULT_RETENTION_DAYS = 90;
@@ -159,14 +165,14 @@ export function pickDailyPassage(pool, dayNumber, ladder) {
 export function dailyPassage(ladder, day) {
   const parsed = parseUtcDay(day);
   if (!parsed || !isMode(ladder)) return null;
-  const pool = poolFor(ladder, DAILY_LENGTH);
+  const pool = day >= CHAT_DAILY_FROM ? chatDailyPool() : poolFor(ladder, DAILY_LENGTH);
   const dayNumber = Math.floor(parsed.startMs / DAY_MS);
   return pickDailyPassage(pool, dayNumber, ladder);
 }
 
 export function passageForAttempt(ladder, passageId) {
   if (!isMode(ladder) || typeof passageId !== "string" || !passageId) return null;
-  return poolFor(ladder, DAILY_LENGTH).find((row) => row.id === passageId) || null;
+  return poolFor(ladder, DAILY_LENGTH).find((row) => row.id === passageId) || chatById(passageId) || null;
 }
 
 // The attempt belongs to the UTC day it started. A finish after midnight is

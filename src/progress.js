@@ -25,16 +25,17 @@ export function matchCount(typed, sentence) {
 }
 
 // Space before the end of a word fills the untyped letters with MISSED and
-// keeps the separating space when the passage has one.
+// keeps the separator. A chat line ends at a newline, so that separator is
+// the newline instead of a space.
 export function wordSkipText(passage, previous) {
   if (typeof passage !== "string" || typeof previous !== "string") return null;
   if (previous.length >= passage.length) return null;
   let end = previous.length;
-  while (end < passage.length && passage[end] !== " ") end += 1;
+  while (end < passage.length && passage[end] !== " " && passage[end] !== "\n") end += 1;
   if (previous.length >= end) return null;
   let next = previous;
   for (let i = previous.length; i < end; i += 1) next += MISSED;
-  if (end < passage.length) next += " ";
+  if (end < passage.length) next += passage[end] === "\n" ? "\n" : " ";
   return next;
 }
 

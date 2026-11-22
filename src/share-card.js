@@ -9,7 +9,7 @@ export const SHARE_CACHE = "public, max-age=31536000, immutable";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const LADDERS = { desktop: "Desktop", mobile: "Mobile", cursor: "Cursor" };
-const FORMATS = { passage: "Passage", timed: "Timed", punctuation: "Punctuation" };
+const FORMATS = { passage: "Passage", timed: "Timed", punctuation: "Punctuation", chat: "Chat" };
 const LENGTHS = { sprint: "Sprint", set: "Set", long: "Long" };
 
 const ESCAPE = {

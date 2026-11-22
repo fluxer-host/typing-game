@@ -9,6 +9,7 @@ export function characterClass(expected, typed, index) {
   const i = Number(index);
   if (!Number.isInteger(i) || i < 0 || i >= sentence.length) return "ch";
   const names = ["ch"];
+  if (sentence[i] === "\n") names.push("br");
   if (i < input.length) names.push(input[i] === sentence[i] ? "ok" : "bad");
   if (i === input.length) names.push("cur");
   return names.join(" ");

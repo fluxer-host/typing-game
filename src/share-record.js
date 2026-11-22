@@ -5,6 +5,7 @@ import { punctuationAllowed } from "./formats.js";
 import { isLength } from "./lengths.js";
 import { isMode } from "./modes.js";
 import { displayName } from "./profile.js";
+import { chatByText } from "./chat.js";
 import { PUNCTUATION_PASSAGES } from "../public/punctuation-passages.js";
 import { publicCardName } from "./share-name.js";
 import { SHARE_VERSION } from "./share-token.js";
@@ -14,6 +15,8 @@ export function describeSavedSentence(mode, sentence) {
   const text = typeof sentence === "string" ? sentence : "";
   const length = lengthOfText(text);
   if (length) return { format: "passage", length };
+  const chat = chatByText(text);
+  if (chat && isLength(chat.length)) return { format: "chat", length: chat.length };
   if (punctuationAllowed(mode)) {
     const row = PUNCTUATION_PASSAGES.find((item) => item.text === text);
     if (row && isLength(row.length)) return { format: "punctuation", length: row.length };
@@ -70,7 +73,7 @@ export function cardFromSavedRace(row, user, showName) {
 
 export function cardFromPractice(body, user, now = Date.now()) {
   const ladder = isMode(body?.ladder) ? body.ladder : "";
-  const format = body?.format === "passage" || body?.format === "timed" || body?.format === "punctuation" ? body.format : "";
+  const format = body?.format === "passage" || body?.format === "timed" || body?.format === "punctuation" || body?.format === "chat" ? body.format : "";
   if (!ladder || !format) return null;
   if (format === "punctuation" && !punctuationAllowed(ladder)) return null;
   const length = format === "timed" ? "" : (isLength(body?.length) ? body.length : "");

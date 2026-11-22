@@ -227,7 +227,7 @@ export function saveStatements(race, plan) {
       delta: 0,
       countRace: false,
     };
-    const keepBest = race.format !== "timed" && race.format !== "punctuation";
+    const keepBest = race.format !== "timed" && race.format !== "punctuation" && race.format !== "chat";
     if (planned.countRace) {
       const won = countsAsWin(row) ? 1 : 0;
       const finished = row.ms != null ? 1 : 0;
@@ -286,7 +286,7 @@ export function saveStatements(race, plan) {
 export async function saveRace(env, race) {
   const cols = columns(race.mode);
   const ids = (race.rows || []).map((row) => row.id);
-  const unrankedFormat = race.format === "timed" || race.format === "punctuation";
+  const unrankedFormat = race.format === "timed" || race.format === "punctuation" || race.format === "chat";
   const rated = Boolean(race.ranked) && ids.length >= 2 && !unrankedFormat;
   let elos = {};
   let pairCounts = {};

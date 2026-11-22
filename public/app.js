@@ -31,6 +31,7 @@ import {
   appendFormatChoices,
   choiceFor,
   CURSOR_PUNCTUATION_NOTE,
+  formatQueueNote,
   formatSummary,
   presentTimedSteps,
   raceMetaFor,
@@ -759,7 +760,7 @@ function raceView() {
     autocorrect: "off",
     spellcheck: "false",
     inputmode: "text",
-    enterkeyhint: "done",
+    enterkeyhint: state.sentence.includes("\n") ? "enter" : "done",
     "aria-label": "Type the passage here",
     "aria-describedby": "race-hint",
   });
@@ -779,11 +780,15 @@ function raceView() {
   tap.addEventListener("click", () => focusCapture());
   box.append(tap);
   const restart = state.localPractice ? " Tab, then Enter, restarts." : "";
+  const chatLine = state.sentence.includes("\n");
+  const move = chatLine
+    ? "Enter starts the next message. Space does that at the end of a line."
+    : "Space moves to the next word.";
   const hint = state.mode === "cursor"
-    ? `Click the keys. Space moves to the next word.${restart} The keyboard does not type on this ladder.`
+    ? `Click the keys. ${move}${restart} The keyboard does not type on this ladder.`
     : state.mode === "mobile"
-      ? `Tap the sentence, or Tap to type, if the phone keyboard is closed. Space moves to the next word.${restart}`
-      : `Type the line. A miss can stay, or Backspace can correct it. Space moves to the next word.${restart}`;
+      ? `Tap the sentence, or Tap to type, if the phone keyboard is closed. ${move}${restart}`
+      : `Type the line. A miss can stay, or Backspace can correct it. ${move}${restart}`;
   box.append(h("p", { id: "race-hint", class: "hint", text: hint }));
   if (state.localPractice) {
     box.append(h("button", {
@@ -839,6 +844,7 @@ function keyboard() {
   }
   const bottom = h("div", { class: "row" });
   bottom.append(keyButton("shift", "shift", "wide"));
+  if (state.sentence.includes("\n")) bottom.append(keyButton("enter", "enter", "wide"));
   bottom.append(keyButton(" ", "space", "space"));
   bottom.append(keyButton("back", "back", "wide"));
   board.append(bottom);
@@ -882,6 +888,10 @@ function pressKey(key) {
   }
   if (key === "back") {
     backspace();
+    return;
+  }
+  if (key === "enter") {
+    typeChar("\n");
     return;
   }
   let ch = key;
@@ -931,7 +941,7 @@ function shareView() {
   if (state.shell === "solo-results") {
     if (state.daily) return null;
     const run = state.soloRun || {};
-    const format = run.format === "timed" || run.format === "punctuation" ? run.format : "passage";
+    const format = run.format === "timed" || run.format === "punctuation" || run.format === "chat" ? run.format : "passage";
     return {
       enabled: Boolean(state.config?.share),
       ready: Number(run.ms) > 0,
@@ -1057,7 +1067,7 @@ function askRematch() {
     sendLobby({ t: "rematch_cancel" });
     return;
   }
-  const roomFormat = state.format === "timed" || state.format === "punctuation";
+  const roomFormat = state.format === "timed" || state.format === "punctuation" || state.format === "chat";
   const alone = state.localPractice || (!state.ranked && !roomFormat) || (state.players || []).length < 2;
   if (alone) {
     releaseRaceSocket();
@@ -1138,11 +1148,14 @@ function raceStandingWord() {
 
 function raceHeading() {
   const ladder = MODES[state.mode]?.title || "Desktop";
-  if (state.daily) return `${ladder} · Set · ${racePillText()}`;
+  if (state.daily) {
+    const size = state.sentence.includes("\n") ? "Chat" : "Set";
+    return `${ladder} · ${size} · ${racePillText()}`;
+  }
   if (state.format === "timed") return `${ladder} · ${formatSummary("timed", state.durationMs, "")}`;
-  if (state.format === "punctuation") {
+  if (state.format === "punctuation" || state.format === "chat") {
     const lengthTitle = lengthInfo(state.length)?.title || "Sprint";
-    return `${ladder} · ${formatSummary("punctuation", 0, lengthTitle)}`;
+    return `${ladder} · ${formatSummary(state.format, 0, lengthTitle)}`;
   }
   const raceLength = lengthInfo(state.length)?.title || "Sprint";
   return `${ladder} · ${raceLength} · ${racePillText()}`;
@@ -1161,7 +1174,7 @@ function racePillText() {
 }
 
 function eloText(row) {
-  if (state.results?.format === "timed" || state.results?.format === "punctuation") return "Unranked";
+  if (state.results?.format === "timed" || state.results?.format === "punctuation" || state.results?.format === "chat") return "Unranked";
   if (row.eloAfter != null && row.eloBefore != null) return formatDelta(row.eloAfter - row.eloBefore);
   if (raceKind() === "room") return "Unranked";
   return "unrated";
@@ -1365,7 +1378,12 @@ function paintPassage() {
   for (let i = 0; i < sentence.length; i += 1) {
     const className = characterClass(sentence, typed, i);
     const span = h("span", { class: className });
-    span.append(document.createTextNode(characterText(sentence, typed, i)));
+    if (sentence[i] === "\n") {
+      span.append(document.createElement("br"));
+      span.append(h("span", { class: "visually-hidden", text: "new line" }));
+    } else {
+      span.append(document.createTextNode(characterText(sentence, typed, i)));
+    }
     const miss = typedMiss(sentence, typed, i);
     if (miss) {
       const label = missLabel(miss);
@@ -1578,8 +1596,18 @@ function onCaptureKeyDown(event) {
   if (state.mode === "cursor") return;
   // A held space skips a word on every repeat and leaves the rest of the
   // line matched against the wrong words, so those words stay red.
-  if (event.repeat && (event.key === " " || event.key === "Spacebar")) {
+  if (event.repeat && (event.key === " " || event.key === "Spacebar" || event.key === "Enter")) {
     event.preventDefault();
+    return;
+  }
+  if (event.key === "Enter") {
+    const result = consumeInput(inputSession, { type: "keydown", key: "Enter", isComposing: event.isComposing });
+    inputSession = result.session;
+    event.preventDefault();
+    if (result.effect.effect === "insert") {
+      commitTyping(result.effect);
+      clearCapture(event.currentTarget);
+    }
     return;
   }
   if (event.key !== "Backspace") return;
@@ -1907,7 +1935,10 @@ function paintFormats() {
   const note = document.getElementById("format-note");
   if (note) note.hidden = state.mode !== "cursor";
   const queue = document.getElementById("format-queue-note");
-  if (queue) queue.hidden = state.format === "passage";
+  if (queue) {
+    queue.hidden = state.format === "passage";
+    queue.textContent = formatQueueNote(state.format);
+  }
 }
 
 function restorePreferences() {
@@ -1989,7 +2020,7 @@ function startPractice() {
     });
     return;
   }
-  beginSolo({ format: state.format === "punctuation" ? "punctuation" : "passage" });
+  beginSolo({ format: state.format === "punctuation" || state.format === "chat" ? state.format : "passage" });
 }
 
 function timedClock() {
@@ -2040,7 +2071,7 @@ function absorbChunk(msg) {
 function withRaceMeta(race) {
   const row = serverRaceRow(race, lengthOfText);
   const meta = raceMetaFor(null, race?.id);
-  if (!meta || (meta.format !== "timed" && meta.format !== "punctuation")) return row;
+  if (!meta || (meta.format !== "timed" && meta.format !== "punctuation" && meta.format !== "chat")) return row;
   row.format = meta.format;
   row.durationMs = meta.durationMs;
   row.label = "Unranked";
@@ -2791,7 +2822,7 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   // Cursor typing goes through the on-screen keys. Desktop still takes a
   // physical key when the hidden capture field is not the target yet.
-  if (event.repeat && (event.key === " " || event.key === "Spacebar")) return;
+  if (event.repeat && (event.key === " " || event.key === "Spacebar" || event.key === "Enter")) return;
   if (plan.effect === "backspace") backspace();
   else if (plan.effect === "type") typeChar(event.key);
 });
@@ -3133,7 +3164,7 @@ function freshSeed() {
 function soloPatch(options = {}) {
   const avoid = state.localRuns.slice(-RECENT_AVOID).map((run) => run.passageId).filter(Boolean);
   if (state.passageId) avoid.push(state.passageId);
-  const format = options.format === "punctuation" ? "punctuation" : "passage";
+  const format = options.format === "punctuation" || options.format === "chat" ? options.format : "passage";
   return soloStart({
     mode: state.mode,
     length: state.length,
@@ -3176,7 +3207,7 @@ function openLocalRace(patch, versus) {
 }
 
 function beginSolo(options = {}) {
-  const format = options.format || (state.format === "punctuation" ? "punctuation" : "passage");
+  const format = options.format || (state.format === "punctuation" || state.format === "chat" ? state.format : "passage");
   if (format === "punctuation" && !punctuationAllowed(state.mode)) {
     toast(CURSOR_PUNCTUATION_NOTE);
     return;
@@ -3184,6 +3215,7 @@ function beginSolo(options = {}) {
   const patch = soloPatch({ ...options, format });
   if (!openLocalRace(patch, null)) return;
   if (format === "punctuation") announce("Go. Punctuation practice started.");
+  else if (format === "chat") announce("Go. Chat practice started.");
   else announce("Go. Practice started.");
 }
 
@@ -3272,7 +3304,7 @@ function dailyCardModel() {
   const played = Boolean(board?.you) || (state.session !== "in" && local);
   return {
     meta: board
-      ? dailyMeta(board.ladder, board.difficulty, board.day)
+      ? dailyMeta(board.ladder, board.difficulty, board.day, board.passage?.includes("\n") ? "Chat" : "Set")
       : (state.dailyError || "Loading today's challenge."),
     countdown: board ? countdownText(now, board.nextDayAt) : "Next challenge in 00:00:00",
     you: board ? dailyYouText({ signedIn: state.session === "in", serverYou: board.you, localRun: local }) : "",
@@ -3598,7 +3630,7 @@ function finishDailyRace() {
 function finishSolo() {
   if (!state.localPractice || state.soloSaved) return;
   state.soloSaved = true;
-  const punctuation = state.format === "punctuation";
+  const side = state.format === "punctuation" || state.format === "chat" ? state.format : "passage";
   const run = soloFinish({
     sentence: state.sentence,
     startAt: state.startAt,
@@ -3608,14 +3640,14 @@ function finishSolo() {
     mode: state.mode,
     length: state.length,
     passageId: state.passageId,
-    format: punctuation ? "punctuation" : "passage",
+    format: side,
     chars: matchCount(state.typed, state.sentence),
   });
   run.opponent = state.versus?.kind === "bot" || state.versus?.kind === "ghost" ? state.versus.kind : "";
   state.soloRun = run;
   state.localRuns = appendRun(state.localRuns, run);
   if (!saveHistory(state.localRuns)) toast("This browser did not save the practice run.");
-  if (!punctuation) {
+  if (side === "passage") {
     const samples = finishTrace(state.trace, run.ms, state.sentence.length);
     const next = considerGhost(state.ghosts, {
       mode: run.mode,
@@ -3680,6 +3712,7 @@ function announceSolo() {
   const detail = `${Number(run.wpm).toFixed(1)} words per minute, ${run.accuracy}% accuracy, ${seconds} seconds, ${run.errors} errors.`;
   if (!state.versus) {
     if (run.format === "punctuation") announce(`Punctuation practice finished. Unranked. ${detail}`);
+    else if (run.format === "chat") announce(`Chat practice finished. Unranked. ${detail}`);
     else announce(`Practice finished. ${detail}`);
     return;
   }
@@ -3716,11 +3749,16 @@ function soloResultsView() {
     });
     return box;
   }
-  const punctuation = run.format === "punctuation";
+  const side = run.format === "punctuation" || run.format === "chat";
+  const formatLine = run.format === "chat"
+    ? "Chat · Unranked. This run stays on this browser."
+    : run.format === "punctuation"
+      ? "Punctuation · Unranked. This run stays on this browser."
+      : "";
   renderSoloResults(box, h, {
     sentence: state.sentence,
-    badge: punctuation ? "Unranked" : "Practice",
-    formatLine: punctuation ? "Punctuation · Unranked. This run stays on this browser." : "",
+    badge: side ? "Unranked" : "Practice",
+    formatLine,
     wpm: run.wpm || 0,
     accuracy: run.accuracy || 0,
     ms: run.ms || 0,
@@ -3752,7 +3790,7 @@ function statsActions() {
       beginSolo({
         same: true,
         passageId: run.passageId,
-        format: run.format === "punctuation" ? "punctuation" : "passage",
+        format: run.format === "punctuation" || run.format === "chat" ? run.format : "passage",
       });
     },
     onExport: downloadHistory,

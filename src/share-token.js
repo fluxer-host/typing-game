@@ -10,7 +10,7 @@ export const MIN_SECRET_LENGTH = 16;
 
 const encoder = new TextEncoder();
 const LADDERS = new Set(["desktop", "mobile", "cursor"]);
-const FORMATS = new Set(["", "passage", "timed", "punctuation"]);
+const FORMATS = new Set(["", "passage", "timed", "punctuation", "chat"]);
 const LENGTHS = new Set(["", "sprint", "set", "long"]);
 
 export function shareSecrets(env) {

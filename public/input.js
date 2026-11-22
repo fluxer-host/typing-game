@@ -47,6 +47,7 @@ export function emptyInputSession() {
     pendingInput: 0,
     needInput: false,
     ignoreDelete: false,
+    ignoreLine: false,
     buffer: "",
   };
 }
@@ -61,6 +62,7 @@ export function settleInput(session) {
     pendingInput: 0,
     needInput: false,
     ignoreDelete: false,
+    ignoreLine: false,
     buffer: typeof session?.buffer === "string" ? session.buffer : "",
   };
 }
@@ -80,6 +82,7 @@ function sessionFrom(session) {
     pendingInput: pendingCount(session?.pendingInput),
     needInput: Boolean(session?.needInput),
     ignoreDelete: Boolean(session?.ignoreDelete),
+    ignoreLine: Boolean(session?.ignoreLine),
     buffer: typeof session?.buffer === "string" ? session.buffer : "",
   };
 }
@@ -129,7 +132,15 @@ export function consumeInput(session, event) {
 
   if (type === "keydown") {
     // Letters arrive through beforeinput or input. keydown is only a
-    // fallback for Backspace when the browser does not emit a delete event.
+    // fallback for Backspace when the browser does not emit a delete event,
+    // and for Enter, which a single-line field does not insert on its own.
+    if (event.key === "Enter" && !current.composing && !event.isComposing) {
+      return outcome({
+        ...current,
+        ignoreLine: true,
+        pendingInput: pendingCount(current.pendingInput + 1),
+      }, { effect: "insert", chars: ["\n"] });
+    }
     if (event.key === "Backspace" && !current.composing && !event.isComposing) {
       return outcome({
         ...current,
@@ -147,6 +158,15 @@ export function consumeInput(session, event) {
     }
     if (current.suppressInsert && isPlainInsert(inputType)) {
       return outcome(current, { effect: "ignore" });
+    }
+    if (inputType === "insertLineBreak" || inputType === "insertParagraph") {
+      if (current.ignoreLine) return outcome({ ...current, ignoreLine: false }, { effect: "ignore" });
+      return outcome({
+        ...current,
+        pendingInput: pendingCount(current.pendingInput + 1),
+        needInput: false,
+        ignoreLine: false,
+      }, { effect: "insert", chars: ["\n"] });
     }
     if (WORD_OR_CHAR_DELETE.has(inputType)) {
       if (current.ignoreDelete) return outcome({ ...current, ignoreDelete: false }, { effect: "ignore" });
@@ -193,11 +213,12 @@ export function consumeInput(session, event) {
       if (!chars.length) return outcome(next, { effect: "ignore" });
       return outcome(next, { effect: "insert", chars });
     }
-    if (current.suppressInsert || current.pendingInput > 0) {
+    if (current.ignoreLine || current.suppressInsert || current.pendingInput > 0) {
       return outcome({
         ...current,
         buffer: seenBuffer,
         suppressInsert: false,
+        ignoreLine: false,
         pendingInput: current.pendingInput > 0 ? current.pendingInput - 1 : 0,
         needInput: false,
       }, { effect: "ignore" });
@@ -244,6 +265,18 @@ export function applyTyping(state, effect) {
   for (const ch of effect.chars || []) {
     if (ch.length !== 1) continue;
     if (current.length >= target.length) break;
+    const at = target[current.length];
+    if (ch === "\n" && at !== "\n") {
+      nextErr += 1;
+      continue;
+    }
+    if (at === "\n" && (ch === " " || ch === "\n")) {
+      current += "\n";
+      nextOk += 1;
+      steps.push(stepFor(current, target));
+      if (current === target) break;
+      continue;
+    }
     const skip = ch === " " ? wordSkipText(target, current) : null;
     if (skip) {
       for (const unit of skip.slice(current.length)) {
@@ -256,10 +289,11 @@ export function applyTyping(state, effect) {
       // so those characters land on the next word instead of being dropped.
       continue;
     }
-    // A letter does not spill into the next word. Space is what moves on.
-    // Dropping the leftover letters here used to discard the space that
-    // followed them in the same burst, so the line never lined up again.
-    if (target[current.length] === " " && ch !== " ") {
+    // A letter does not spill into the next word or the next message.
+    // Space is what moves on. Dropping the leftover letters here used to
+    // discard the space that followed them in the same burst, so the line
+    // never lined up again.
+    if ((at === " " || at === "\n") && ch !== " " && ch !== "\n") {
       nextErr += 1;
       continue;
     }

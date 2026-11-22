@@ -385,6 +385,13 @@ a.btn { text-decoration: none; }
   text-underline-offset: 0.12em;
 }
 
+.ch.br,
+.ch.br.ok,
+.ch.br.bad {
+  text-decoration: none;
+  background: transparent;
+}
+
 .ch.cur { box-shadow: -2px 0 0 var(--flux-2); }
 
 .ch.cur:not(.bad) { color: var(--flux-2); }

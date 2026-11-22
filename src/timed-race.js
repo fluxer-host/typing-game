@@ -5,6 +5,7 @@ import { punctuationAllowed, readDurationMs, readFormat } from "./formats.js";
 import { isLength, LENGTHS } from "./lengths.js";
 import { normalizeKind } from "./match.js";
 import { isMode } from "./modes.js";
+import { chatOk } from "./chat.js";
 import { punctuationOk } from "./punctuation.js";
 import { poolFor } from "./sentences.js";
 import { extendStream, openStream, revealFor, TIMED_CHUNK_CHARS, TIMED_REVEAL_REMAINING } from "./timed.js";
@@ -27,9 +28,12 @@ export function prepareUnrankedInit(body) {
   if (format === "passage") return { error: "race" };
   if (kind === "queue") return { error: "ranked" };
   if (!isMode(body?.mode)) return { error: "race" };
-  if (format === "punctuation") {
-    if (!punctuationAllowed(body.mode)) return { error: "cursor" };
-    if (!punctuationOk(body.mode, LENGTHS[length].sentences, body.sentence)) return { error: "race" };
+  if (format === "punctuation" || format === "chat") {
+    if (format === "punctuation" && !punctuationAllowed(body.mode)) return { error: "cursor" };
+    const known = format === "chat"
+      ? chatOk(body.mode, LENGTHS[length].sentences, body.sentence)
+      : punctuationOk(body.mode, LENGTHS[length].sentences, body.sentence);
+    if (!known) return { error: "race" };
     return {
       format,
       length,

@@ -6,6 +6,7 @@ import { MISSED, wordSkipText } from "../src/progress.js";
 import { wpm } from "../src/score.js";
 import { poolFor } from "../src/sentences.js";
 import {
+  CHAT_DAILY_FROM,
   DAILY_BOARD_DEFAULT_LIMIT,
   DAILY_MAX_ATTEMPT_MS,
   DAILY_MAX_STEPS,
@@ -17,6 +18,7 @@ import {
   isBetterDailyScore,
   isUniqueViolation,
   parseDailyQuery,
+  passageForAttempt,
   parseSubmitBody,
   parseUtcDay,
   pickDailyPassage,
@@ -143,6 +145,30 @@ test("consecutive days do not repeat a passage when the pool has more than one",
       previous = picked.id;
     }
   }
+  const before = dailyPassage("desktop", "2026-11-22");
+  const first = dailyPassage("desktop", CHAT_DAILY_FROM);
+  assert.equal(CHAT_DAILY_FROM, "2026-11-23");
+  assert.equal(before.text.includes("\n"), false);
+  assert.equal(first.text.includes("\n"), true);
+  assert.equal(first.text, first.text.toLowerCase());
+  assert.equal(/[.,?'"!():;\-]/.test(first.text), false);
+  const lines = first.text.split("\n");
+  assert.ok(lines.length === 3 || lines.length === 4);
+  assert.equal(passageForAttempt("desktop", first.id)?.text, first.text);
+  assert.equal(passageForAttempt("desktop", before.id)?.text, before.text);
+  let previous = "";
+  for (let i = 0; i < 40; i += 1) {
+    const day = utcDayString(Date.parse(`${CHAT_DAILY_FROM}T00:00:00.000Z`) + i * DAY_MS);
+    for (const ladder of ["desktop", "mobile", "cursor"]) {
+      const picked = dailyPassage(ladder, day);
+      assert.equal(picked.text.includes("\n"), true, `${ladder} ${day}`);
+      assert.ok(picked.text.split("\n").length === 3 || picked.text.split("\n").length === 4);
+    }
+    const desktop = dailyPassage("desktop", day);
+    if (previous) assert.notEqual(desktop.id, previous, day);
+    previous = desktop.id;
+  }
+
   const only = [{ id: "only", text: "Hello." }];
   assert.equal(pickDailyPassage(only, 10, "desktop").id, "only");
   assert.equal(pickDailyPassage(only, 11, "desktop").id, "only");

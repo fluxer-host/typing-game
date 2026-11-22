@@ -50,8 +50,8 @@ export function normalizeRun(raw) {
       row.format = "timed";
       row.durationMs = durationMs;
     }
-  } else if (raw.format === "punctuation") {
-    row.format = "punctuation";
+  } else if (raw.format === "punctuation" || raw.format === "chat") {
+    row.format = raw.format;
   }
   return row;
 }
@@ -120,6 +120,10 @@ export function lengthLabel(run) {
     const name = lengthName(run?.length);
     return name ? `Punctuation · ${name}` : "Punctuation";
   }
+  if (run?.format === "chat") {
+    const name = lengthName(run?.length);
+    return name ? `Chat · ${name}` : "Chat";
+  }
   return lengthName(run?.length);
 }
 
@@ -127,7 +131,7 @@ export function personalBests(runs) {
   const best = {};
   for (const run of Array.isArray(runs) ? runs : []) {
     if (!LADDER_NAMES[run?.mode]) continue;
-    const format = run?.format === "timed" || run?.format === "punctuation" ? run.format : "passage";
+    const format = run?.format === "timed" || run?.format === "punctuation" || run?.format === "chat" ? run.format : "passage";
     if (format !== "timed" && !LENGTH_NAMES[run?.length]) continue;
     const wpm = Number(run.wpm);
     if (!Number.isFinite(wpm)) continue;
@@ -171,7 +175,7 @@ export function bestByPassage(runs, passageIdForText) {
 
 export function displayStanding(run) {
   if (!run || typeof run !== "object") return "";
-  if (run.format === "timed" || run.format === "punctuation") return "Unranked";
+  if (run.format === "timed" || run.format === "punctuation" || run.format === "chat") return "Unranked";
   if (run.ranked === true || run.label === "rated") return "Ranked";
   if (run.label === "Unranked") return "Unranked";
   return "Practice";

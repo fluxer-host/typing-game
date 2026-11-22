@@ -72,7 +72,7 @@ export function buildResults(state, now) {
     ranked: Boolean(state.ranked),
     kind: raceKind(state, rows.length),
     mode: state.mode,
-    ...(state.format === "punctuation" ? { format: "punctuation" } : {}),
+    ...(state.format === "punctuation" || state.format === "chat" ? { format: state.format } : {}),
     sentence: state.sentence,
     rows: rows.map((row) => {
       const before = row.player.eloAtStart ?? 1000;

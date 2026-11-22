@@ -1,7 +1,7 @@
 // Race format is separate from the ladder (mode) and the length.
 // The ranked queue is always a passage race. Timed and punctuation are unranked.
 
-export const FORMAT_IDS = ["passage", "timed", "punctuation"];
+export const FORMAT_IDS = ["passage", "timed", "punctuation", "chat"];
 
 export const TIMED_DURATIONS_MS = [30000, 60000, 120000];
 

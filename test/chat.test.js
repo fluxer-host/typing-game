@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { chatById, chatOk, findChatIssues, pickChatRecord } from "../src/chat.js";
+import { MISSED, wordSkipText } from "../src/progress.js";
+import { applyTyping, consumeInput, emptyInputSession } from "../public/input.js";
+import { characterClass } from "../public/passage.js";
+import { soloStart } from "../public/solo.js";
+
+test("chat passages are short lowercase messages on every ladder", () => {
+  const issues = findChatIssues();
+  assert.deepEqual(issues, []);
+  const sprint = pickChatRecord("cursor", 1, { random: () => 0 });
+  const set = pickChatRecord("mobile", 3, { random: () => 0 });
+  const long = pickChatRecord("desktop", 5, { random: () => 0.99 });
+  assert.equal(sprint.text.split("\n").length, 3);
+  assert.equal(set.text.split("\n").length, 4);
+  assert.equal(long.text.split("\n").length, 6);
+  assert.equal(chatOk("cursor", 1, sprint.text), true);
+  assert.equal(chatOk("desktop", 3, sprint.text), false);
+  assert.equal(chatById(sprint.id).text, sprint.text);
+});
+
+test("enter and space move to the next chat message without shifting it", () => {
+  const sentence = "hey you\nok";
+  assert.equal(characterClass(sentence, "hey you", 7), "ch br cur");
+  const skipped = wordSkipText(sentence, "he");
+  assert.equal(skipped, `he${MISSED} `);
+  const toLine = wordSkipText(sentence, "hey");
+  assert.equal(toLine, null);
+  const spaced = applyTyping({ typed: "hey you", sentence, ok: 7, err: 0 }, { effect: "insert", chars: [" "] });
+  assert.equal(spaced.typed, "hey you\n");
+  assert.equal(spaced.ok, 8);
+  assert.equal(spaced.err, 0);
+  const entered = applyTyping({ typed: "hey you", sentence, ok: 7, err: 0 }, { effect: "insert", chars: ["\n"] });
+  assert.equal(entered.typed, "hey you\n");
+  const next = applyTyping({ ...entered, sentence }, { effect: "insert", chars: ["o", "k"] });
+  assert.equal(next.typed, sentence);
+  assert.equal(next.finished, true);
+  const mid = applyTyping({ typed: "he", sentence, ok: 2, err: 0 }, { effect: "insert", chars: ["\n"] });
+  assert.equal(mid.typed, "he");
+  assert.equal(mid.changed, false);
+  const key = consumeInput(emptyInputSession(), { type: "keydown", key: "Enter" });
+  assert.equal(key.effect.effect, "insert");
+  assert.deepEqual(key.effect.chars, ["\n"]);
+  const again = consumeInput(key.session, { type: "beforeinput", inputType: "insertLineBreak" });
+  assert.equal(again.effect.effect, "ignore");
+  const solo = soloStart({ mode: "cursor", length: "sprint", format: "chat", now: 1, random: () => 0 });
+  assert.equal(solo.format, "chat");
+  assert.equal(solo.sentence.split("\n").length, 3);
+});

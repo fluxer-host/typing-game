@@ -6,6 +6,7 @@ import { isLength, LENGTHS } from "./lengths.js";
 import { nextMatchAt, nextQueuedAt, normalizeKind, pickGroup } from "./match.js";
 import { isMode } from "./modes.js";
 import { websocketOriginAllowed } from "./origin.js";
+import { pickChatRecord } from "./chat.js";
 import { pickPunctuationRecord } from "./punctuation.js";
 import { publicPlayer } from "./profile.js";
 import { REMATCH_TTL_MS, rematchExpired } from "./retention.js";
@@ -764,6 +765,10 @@ export class Lobby {
         record = pickPunctuationRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
         sentence = record?.text || "";
         if (!sentence) throw new Error("punctuation");
+      } else if (settings.format === "chat") {
+        record = pickChatRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
+        sentence = record?.text || "";
+        if (!sentence) throw new Error("chat");
       } else {
         record = pickPassageRecord(mode, LENGTHS[lane].sentences, { avoid: this.avoidFor(live) });
         sentence = record?.text || "";

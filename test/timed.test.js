@@ -255,6 +255,16 @@ test("the ranked queue ignores a timed or punctuation request", () => {
     ranked: false,
   });
   assert.equal(settingsForKind("practice", { format: "punctuation" }).ranked, false);
+  assert.deepEqual(settingsForKind("queue", { format: "chat" }), {
+    format: "passage",
+    durationMs: 0,
+    ranked: true,
+  });
+  assert.deepEqual(settingsForKind("practice", { format: "chat" }), {
+    format: "chat",
+    durationMs: 0,
+    ranked: false,
+  });
 });
 
 test("the race save passes format through so a timed finish can skip best pace", () => {

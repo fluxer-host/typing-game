@@ -118,11 +118,11 @@ export function dailyYouText({ signedIn, serverYou, localRun }) {
   return "You have not finished today's challenge. Sign in to submit a score.";
 }
 
-export function dailyMeta(ladder, difficulty, day) {
+export function dailyMeta(ladder, difficulty, day, size = "Set") {
   const name = ladderName(ladder) || "Desktop";
   const skill = difficultyName(difficulty);
   const when = formatUtcDay(day);
-  return [name, "Set", skill, when].filter(Boolean).join(" · ");
+  return [name, size || "Set", skill, when].filter(Boolean).join(" · ");
 }
 
 export function dailyKeptCopy(wpm) {

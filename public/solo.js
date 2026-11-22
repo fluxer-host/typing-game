@@ -1,6 +1,12 @@
+import { chatById, pickChatRecord } from "../src/chat.js";
 import { accuracy, wpm } from "../src/score.js";
 import { punctuationById, pickPunctuationRecord } from "../src/punctuation.js";
 import { countForLength, passageById, pickPassageRecord } from "../src/sentences.js";
+
+function practiceFormat(format) {
+  if (format === "punctuation" || format === "chat") return format;
+  return "passage";
+}
 
 export function soloPlayer(me) {
   return {
@@ -18,16 +24,16 @@ export function passageFits(record, mode, length) {
 
 export function soloStart({ mode, length, me, now, avoid = [], passageId = "", same = false, random, format } = {}) {
   const count = countForLength(length);
-  const punctuation = format === "punctuation";
+  const kind = practiceFormat(format);
   let record = null;
   if (passageId) {
-    const found = punctuation ? punctuationById(passageId) : passageById(passageId);
-    if (punctuation) {
-      if (found && found.length === length) record = found;
-    } else if (passageFits(found, mode, length)) record = found;
+    const found = kind === "chat" ? chatById(passageId) : kind === "punctuation" ? punctuationById(passageId) : passageById(passageId);
+    if (kind === "passage") {
+      if (passageFits(found, mode, length)) record = found;
+    } else if (found && found.length === length) record = found;
   }
   if (!record) {
-    const pick = punctuation ? pickPunctuationRecord : pickPassageRecord;
+    const pick = kind === "chat" ? pickChatRecord : kind === "punctuation" ? pickPunctuationRecord : pickPassageRecord;
     record = pick(mode, count, {
       avoid: same ? [] : avoid,
       random,
@@ -63,7 +69,7 @@ export function soloStart({ mode, length, me, now, avoid = [], passageId = "", s
     room: null,
     queue: null,
     shift: false,
-    format: punctuation ? "punctuation" : "passage",
+    format: kind,
     durationMs: 0,
   };
 }
@@ -86,6 +92,7 @@ export function soloFinish({ sentence, startAt, now, ok, err, mode, length, pass
     errors: bad > 0 ? bad : 0,
     ranked: false,
   };
-  if (format === "punctuation") row.format = "punctuation";
+  const kind = practiceFormat(format);
+  if (kind !== "passage") row.format = kind;
   return row;
 }
