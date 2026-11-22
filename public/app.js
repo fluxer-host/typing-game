@@ -1570,12 +1570,19 @@ function releaseComposeGuard() {
   const epoch = ++composeEpoch;
   setTimeout(() => {
     if (epoch !== composeEpoch) return;
-    inputSession = { ...inputSession, suppressInsert: false, skipInput: false };
+    inputSession = { ...inputSession, suppressInsert: false, pendingInput: 0, needInput: false };
   }, 100);
 }
 
 function onCaptureKeyDown(event) {
-  if (state.mode === "cursor" || event.key !== "Backspace") return;
+  if (state.mode === "cursor") return;
+  // A held space skips a word on every repeat and leaves the rest of the
+  // line matched against the wrong words, so those words stay red.
+  if (event.repeat && (event.key === " " || event.key === "Spacebar")) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key !== "Backspace") return;
   const result = consumeInput(inputSession, { type: "keydown", key: event.key, isComposing: event.isComposing });
   inputSession = result.session;
   if (result.effect.effect !== "backspace") return;
@@ -2784,6 +2791,7 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   // Cursor typing goes through the on-screen keys. Desktop still takes a
   // physical key when the hidden capture field is not the target yet.
+  if (event.repeat && (event.key === " " || event.key === "Spacebar")) return;
   if (plan.effect === "backspace") backspace();
   else if (plan.effect === "type") typeChar(event.key);
 });

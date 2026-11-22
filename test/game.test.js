@@ -981,6 +981,64 @@ test("an input event supplies the character when beforeinput has no data", () =>
   assert.equal(state.typed, "\u00e9");
 });
 
+function typeEvents(sentence, events) {
+  let session = emptyInputSession();
+  let state = { typed: "", sentence, ok: 0, err: 0 };
+  for (const event of events) {
+    const result = consumeInput(session, event);
+    session = result.session;
+    const next = applyTyping(state, result.effect);
+    if (next.changed) state = { typed: next.typed, sentence, ok: next.ok, err: next.err };
+  }
+  return state;
+}
+
+function marksFor(sentence, typed) {
+  return [...typed].map((ch, index) => (ch === "\u0001" ? "M" : (ch === sentence[index] ? "o" : "X"))).join("");
+}
+
+test("a fast mistake and space do not skip the following word", () => {
+  const sentence = "hello world again";
+  const events = [];
+  for (const ch of "x ") events.push({ type: "beforeinput", inputType: "insertText", data: ch });
+  for (const ch of "x ") events.push({ type: "input", inputType: "insertText", data: ch, value: ch });
+  for (const ch of "world") {
+    events.push({ type: "beforeinput", inputType: "insertText", data: ch });
+    events.push({ type: "input", inputType: "insertText", data: ch, value: ch });
+  }
+  const state = typeEvents(sentence, events);
+  assert.equal(marksFor(sentence, state.typed), "XMMMMoooooo");
+  assert.equal(state.typed.endsWith("world"), true);
+});
+
+test("a growing field value contributes only the new characters", () => {
+  const sentence = "hello world";
+  let built = "";
+  const events = [];
+  for (const ch of "xhello world") {
+    built += ch;
+    events.push({ type: "beforeinput", inputType: "insertText", data: null });
+    events.push({ type: "input", inputType: "insertText", data: null, value: built });
+  }
+  const state = typeEvents(sentence, events);
+  assert.equal(state.typed, "xhell world");
+  assert.equal(marksFor(sentence, state.typed), "XXXoXoooooo");
+});
+
+test("a burst that reaches the word boundary still types the next word", () => {
+  const sentence = "hello world";
+  const events = [];
+  for (const ch of "hxell") {
+    events.push({ type: "beforeinput", inputType: "insertText", data: ch });
+    events.push({ type: "input", inputType: "insertText", data: ch, value: "" });
+  }
+  events.push({ type: "beforeinput", inputType: "insertText", data: "o world" });
+  events.push({ type: "input", inputType: "insertText", data: "o world", value: "o world" });
+  const state = typeEvents(sentence, events);
+  assert.equal(state.typed, "hxell world");
+  assert.equal(marksFor(sentence, state.typed), "oXXoXoooooo");
+});
+
 test("the page keeps a signed-in shell independent of config and guards a second start", () => {
   const src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(src, /Promise\.allSettled\(\[pullMe\(\), pullConfig\(\), pullBoard\(\), pullDaily\(\)\]\)/);

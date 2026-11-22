@@ -41,28 +41,62 @@ export function correctLength(typed, sentence) {
 }
 
 export function emptyInputSession() {
-  return { composing: false, suppressInsert: false, skipInput: false, ignoreDelete: false };
+  return {
+    composing: false,
+    suppressInsert: false,
+    pendingInput: 0,
+    needInput: false,
+    ignoreDelete: false,
+    buffer: "",
+  };
 }
 
 // Drops one-shot guards after the events that belong to the same keystroke.
+// `buffer` stays. It is the field text already accounted for, so a later
+// snapshot can contribute only its new suffix.
 export function settleInput(session) {
   return {
     composing: Boolean(session?.composing),
     suppressInsert: false,
-    skipInput: false,
+    pendingInput: 0,
+    needInput: false,
     ignoreDelete: false,
+    buffer: typeof session?.buffer === "string" ? session.buffer : "",
   };
 }
 
 const WORD_OR_CHAR_DELETE = new Set(["deleteContentBackward", "deleteWordBackward"]);
 
+function pendingCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  return Math.min(32, Math.floor(count));
+}
+
 function sessionFrom(session) {
   return {
     composing: Boolean(session?.composing),
     suppressInsert: Boolean(session?.suppressInsert),
-    skipInput: Boolean(session?.skipInput),
+    pendingInput: pendingCount(session?.pendingInput),
+    needInput: Boolean(session?.needInput),
     ignoreDelete: Boolean(session?.ignoreDelete),
+    buffer: typeof session?.buffer === "string" ? session.buffer : "",
   };
+}
+
+// `previous` is field text already turned into keystrokes. A growing field
+// value contributes only the new suffix. A cleared field contributes its
+// whole value, which is the text typed since the clear.
+function snapshotDelta(previous, value) {
+  const prev = typeof previous === "string" ? previous : "";
+  const next = typeof value === "string" ? value : "";
+  if (prev && next.startsWith(prev)) return { buffer: next, text: next.slice(prev.length) };
+  return { buffer: next, text: next };
+}
+
+function unitsBefore(value, count) {
+  const units = textUnits(value);
+  return units.slice(0, Math.max(0, units.length - count)).join("");
 }
 
 function outcome(session, effect) {
@@ -83,10 +117,13 @@ export function consumeInput(session, event) {
 
   if (type === "compositionend") {
     const chars = textUnits(event?.data || "");
-    const next = { ...current, composing: false };
+    const next = { ...current, composing: false, needInput: false };
     if (!chars.length) return outcome(next, { effect: "defer" });
+    // The browser often emits the committed text once more. Swallow that
+    // one follow-up without forgetting earlier keystrokes still in flight.
     next.suppressInsert = true;
-    next.skipInput = true;
+    next.pendingInput = pendingCount(current.pendingInput + 1);
+    next.buffer = current.buffer + chars.join("");
     return outcome(next, { effect: "insert", chars });
   }
 
@@ -94,7 +131,11 @@ export function consumeInput(session, event) {
     // Letters arrive through beforeinput or input. keydown is only a
     // fallback for Backspace when the browser does not emit a delete event.
     if (event.key === "Backspace" && !current.composing && !event.isComposing) {
-      return outcome({ ...current, ignoreDelete: true }, { effect: "backspace" });
+      return outcome({
+        ...current,
+        ignoreDelete: true,
+        buffer: unitsBefore(current.buffer, 1),
+      }, { effect: "backspace" });
     }
     return outcome(current, { effect: "ignore" });
   }
@@ -105,36 +146,72 @@ export function consumeInput(session, event) {
       return outcome(current, { effect: "defer" });
     }
     if (current.suppressInsert && isPlainInsert(inputType)) {
-      return outcome({ ...current, skipInput: true }, { effect: "ignore" });
+      return outcome(current, { effect: "ignore" });
     }
     if (WORD_OR_CHAR_DELETE.has(inputType)) {
       if (current.ignoreDelete) return outcome({ ...current, ignoreDelete: false }, { effect: "ignore" });
-      return outcome({ ...current, skipInput: true, ignoreDelete: false }, { effect: "backspace" });
+      return outcome({
+        ...current,
+        pendingInput: pendingCount(current.pendingInput + 1),
+        ignoreDelete: false,
+        needInput: false,
+        buffer: unitsBefore(current.buffer, 1),
+      }, { effect: "backspace" });
     }
     if (inputType === "insertText") {
       const chars = textUnits(event.data || "");
-      if (!chars.length) return outcome(current, { effect: "defer" });
-      return outcome({ ...current, skipInput: true }, { effect: "insert", chars });
+      // Some browsers leave `data` empty and put the text on the following
+      // input event. Remember that, or a pending duplicate swallows it.
+      if (!chars.length) return outcome({ ...current, needInput: true }, { effect: "defer" });
+      return outcome({
+        ...current,
+        pendingInput: pendingCount(current.pendingInput + 1),
+        needInput: false,
+        buffer: current.buffer + chars.join(""),
+      }, { effect: "insert", chars });
     }
-    return outcome({ ...current, skipInput: true }, { effect: "reject" });
+    return outcome({
+      ...current,
+      pendingInput: pendingCount(current.pendingInput + 1),
+      needInput: false,
+    }, { effect: "reject" });
   }
 
   if (type === "input") {
     if (current.composing) return outcome(current, { effect: "defer" });
-    if (current.suppressInsert || current.skipInput) {
-      return outcome({ ...current, suppressInsert: false, skipInput: false }, { effect: "ignore" });
-    }
     const inputType = event.inputType || "";
+    const data = typeof event.data === "string" ? event.data : "";
+    const value = typeof event.value === "string" ? event.value : "";
+    const snap = data ? null : snapshotDelta(current.buffer, value);
+    const text = data || snap?.text || "";
+    // `data` is the new text. A value without data is the whole field.
+    const appliedBuffer = data ? (value || current.buffer + data) : (snap ? snap.buffer : current.buffer);
+    const seenBuffer = value || current.buffer;
+    if (current.needInput) {
+      const chars = textUnits(text);
+      const next = { ...current, buffer: appliedBuffer, pendingInput: 0, needInput: false, suppressInsert: false };
+      if (!chars.length) return outcome(next, { effect: "ignore" });
+      return outcome(next, { effect: "insert", chars });
+    }
+    if (current.suppressInsert || current.pendingInput > 0) {
+      return outcome({
+        ...current,
+        buffer: seenBuffer,
+        suppressInsert: false,
+        pendingInput: current.pendingInput > 0 ? current.pendingInput - 1 : 0,
+        needInput: false,
+      }, { effect: "ignore" });
+    }
     if (WORD_OR_CHAR_DELETE.has(inputType)) {
-      if (current.ignoreDelete) return outcome({ ...current, ignoreDelete: false }, { effect: "ignore" });
-      return outcome({ ...current, ignoreDelete: false }, { effect: "backspace" });
+      if (current.ignoreDelete) return outcome({ ...current, buffer: seenBuffer, ignoreDelete: false }, { effect: "ignore" });
+      return outcome({ ...current, buffer: unitsBefore(seenBuffer, 1), ignoreDelete: false }, { effect: "backspace" });
     }
     if (inputType && !isPlainInsert(inputType)) {
-      return outcome(current, { effect: "reject" });
+      return outcome({ ...current, buffer: seenBuffer }, { effect: "reject" });
     }
-    const chars = textUnits(event.data || event.value || "");
-    if (!chars.length) return outcome(current, { effect: "ignore" });
-    return outcome(current, { effect: "insert", chars });
+    const chars = textUnits(text);
+    if (!chars.length) return outcome({ ...current, buffer: seenBuffer }, { effect: "ignore" });
+    return outcome({ ...current, buffer: appliedBuffer }, { effect: "insert", chars });
   }
 
   return outcome(current, { effect: "ignore" });
@@ -165,7 +242,7 @@ export function applyTyping(state, effect) {
   let nextErr = err;
   const steps = [];
   for (const ch of effect.chars || []) {
-    if (ch.length !== 1) break;
+    if (ch.length !== 1) continue;
     if (current.length >= target.length) break;
     const skip = ch === " " ? wordSkipText(target, current) : null;
     if (skip) {
@@ -175,10 +252,17 @@ export function applyTyping(state, effect) {
       }
       current = skip;
       steps.push(stepFor(current, target));
-      break;
+      // A burst can hold the rest of the line after the space. Keep going
+      // so those characters land on the next word instead of being dropped.
+      continue;
     }
     // A letter does not spill into the next word. Space is what moves on.
-    if (target[current.length] === " " && ch !== " ") break;
+    // Dropping the leftover letters here used to discard the space that
+    // followed them in the same burst, so the line never lined up again.
+    if (target[current.length] === " " && ch !== " ") {
+      nextErr += 1;
+      continue;
+    }
     const expected = target[current.length];
     current += ch;
     if (ch === expected) nextOk += 1;
