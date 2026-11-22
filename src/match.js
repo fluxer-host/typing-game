@@ -126,3 +126,21 @@ export function normalizeKind(kind, ranked, racers) {
   if (ranked) return "queue";
   return Number(racers) >= 2 ? "room" : "practice";
 }
+
+// Shared rooms and the ranked queue wait for a second Rematch click.
+// A local run, and a race with one racer, starts practice on this browser.
+export function rematchStartsLocal({
+  localPractice = false,
+  ranked = false,
+  kind = null,
+  resultsKind = null,
+  racers = 0,
+} = {}) {
+  if (localPractice) return true;
+  const count = Number(racers) || 0;
+  if (count < 2) return true;
+  const listed = resultsKind === "room" || resultsKind === "practice" || resultsKind === "queue"
+    ? resultsKind
+    : kind;
+  return normalizeKind(listed, ranked, count) === "practice";
+}

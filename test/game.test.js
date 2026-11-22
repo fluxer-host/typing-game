@@ -20,6 +20,7 @@ import {
   nextQueuedAt,
   pickGroup,
   pickOpponent,
+  rematchStartsLocal,
   waitForWindow,
 } from "../src/match.js";
 import { commitRating, pairCountsFromRows, planRating, standingLabel } from "../src/rating.js";
@@ -1152,6 +1153,17 @@ test("the rating window starts at 100 and then matches anyone", () => {
   assert.equal(waitForWindow(80), 0);
   assert.equal(waitForWindow(300), 20000);
   assert.equal(waitForWindow(5000), 30000);
+});
+
+test("a passage room rematch waits, and a solo result starts locally", () => {
+  const room = { localPractice: false, ranked: false, kind: "room", resultsKind: "room", racers: 2 };
+  assert.equal(rematchStartsLocal(room), false);
+  assert.equal(rematchStartsLocal({ ...room, kind: null, resultsKind: null }), false);
+  assert.equal(rematchStartsLocal({ localPractice: false, ranked: true, kind: "queue", racers: 3 }), false);
+  assert.equal(rematchStartsLocal({ localPractice: false, ranked: false, kind: "room", resultsKind: "room", racers: 2 }), false);
+  assert.equal(rematchStartsLocal({ localPractice: true, ranked: false, kind: "room", racers: 2 }), true);
+  assert.equal(rematchStartsLocal({ localPractice: false, ranked: false, kind: "practice", racers: 1 }), true);
+  assert.equal(rematchStartsLocal({ localPractice: false, ranked: false, resultsKind: "practice", kind: "room", racers: 2 }), true);
 });
 
 test("matchmaking prefers a close opponent and widens with the longer wait", () => {

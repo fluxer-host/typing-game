@@ -22,6 +22,7 @@ import {
   raceInProgress,
 } from "../src/settings.js";
 import { lengthList } from "../src/lengths.js";
+import { rematchStartsLocal } from "../src/match.js";
 import { lengthOfText, passageIdForText, RECENT_AVOID } from "../src/sentences.js";
 import { characterClass, characterText, countCue, missLabel, pageTitle, typedMiss } from "./passage.js";
 import { raceKeyPlan } from "./keys.js";
@@ -1081,9 +1082,14 @@ function askRematch() {
     sendLobby({ t: "rematch_cancel" });
     return;
   }
-  const roomFormat = state.format === "timed" || state.format === "punctuation" || state.format === "chat";
-  const alone = state.localPractice || (!state.ranked && !roomFormat) || (state.players || []).length < 2;
-  if (alone) {
+  const ranked = state.results && typeof state.results.ranked === "boolean" ? state.results.ranked : state.ranked;
+  if (rematchStartsLocal({
+    localPractice: state.localPractice,
+    ranked,
+    kind: state.kind,
+    resultsKind: state.results?.kind,
+    racers: (state.players || []).length,
+  })) {
     releaseRaceSocket();
     if (state.format === "timed" && state.session === "in") {
       beginPlay("practice", { t: "practice", mode: state.mode, length: state.length, format: "timed", durationMs: state.durationMs || 60000 });
