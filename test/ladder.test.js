@@ -331,7 +331,7 @@ test("the ladder model hides filters the tables cannot answer", () => {
   assert.equal(week.rows[0].primary, "420.5");
   assert.equal(week.rows[0].secondary, "6");
   assert.equal(week.rows[0].extra, "98.2%");
-  assert.deepEqual(week.columns.map((column) => column.label), ["Rank", "Racer", "Total WPM", "Days", "Accuracy"]);
+  assert.deepEqual(week.columns.map((column) => column.label), ["Rank", "Racer", "Sum WPM", "Days", "Average accuracy"]);
   assert.equal(week.spans.find((item) => item.id === "week").pressed, true);
   const today = ladderViewModel({
     tab: "daily",

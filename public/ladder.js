@@ -306,9 +306,9 @@ export function ladderViewModel(ladder) {
     ? [
       { key: "rank", label: "Rank", className: "col-rank" },
       { key: "name", label: "Racer", className: "col-name" },
-      { key: "primary", label: "Total WPM", className: "col-score col-total" },
+      { key: "primary", label: "Sum WPM", className: "col-score col-total" },
       { key: "secondary", label: "Days", className: "col-days" },
-      { key: "extra", label: "Accuracy", className: "col-secondary" },
+      { key: "extra", label: "Average accuracy", className: "col-secondary col-avg" },
     ]
     : kind === "daily"
     ? [
