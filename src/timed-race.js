@@ -8,7 +8,7 @@ import { isMode } from "./modes.js";
 import { chatOk } from "./chat.js";
 import { punctuationOk } from "./punctuation.js";
 import { poolFor } from "./sentences.js";
-import { extendStream, openStream, revealFor, TIMED_CHUNK_CHARS, TIMED_REVEAL_REMAINING } from "./timed.js";
+import { extendStream, openStream, revealFor, SOLO_READ_MS, TIMED_CHUNK_CHARS, TIMED_REVEAL_REMAINING } from "./timed.js";
 
 export function freshSeed() {
   const bytes = new Uint32Array(1);
@@ -49,7 +49,7 @@ export function prepareUnrankedInit(body) {
   return {
     format,
     length,
-    limitMs: durationMs,
+    limitMs: kind === "practice" ? durationMs + SOLO_READ_MS : durationMs,
     sentence: opened.sentence,
     extra: {
       format: "timed",

@@ -111,6 +111,22 @@ export function appendFormatChoices(parent, h, options) {
   }));
 }
 
+// A one-player timed practice keeps the full duration on screen until the
+// first character. Rooms and the ranked queue use the shared start.
+export function practiceTimedWaiting({ format, kind, ranked, typingAt } = {}) {
+  return format === "timed" && kind === "practice" && !ranked && !Number.isFinite(typingAt);
+}
+
+export function timedDisplayLeft({ format, kind, ranked, typingAt, startAt, durationMs } = {}, now) {
+  const duration = Number(durationMs) || 0;
+  if (format !== "timed") return 0;
+  if (kind === "practice" && !ranked) {
+    if (!Number.isFinite(typingAt)) return duration;
+    return remainingMs(typingAt, duration, now);
+  }
+  return remainingMs(startAt, duration, now);
+}
+
 export function remainingMs(startAt, durationMs, now) {
   const duration = Number(durationMs);
   if (!Number.isFinite(duration) || duration <= 0) return 0;

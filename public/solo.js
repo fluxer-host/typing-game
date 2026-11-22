@@ -71,7 +71,27 @@ export function soloStart({ mode, length, me, now, avoid = [], passageId = "", s
     shift: false,
     format: kind,
     durationMs: 0,
+    soloClock: false,
   };
+}
+
+// Local practice, including the daily, keeps the clock at ready until the
+// first accepted character. A shared race passes localPractice false.
+export function soloClockWaiting({ localPractice = false, daily = null, soloClock = false } = {}) {
+  if (!localPractice) return false;
+  if (daily) return !daily.clock;
+  return !soloClock;
+}
+
+// The first character replaces the opening stamp so reading time is not pace.
+export function takeSoloClock(run, now) {
+  const startAt = Number.isFinite(Number(run?.startAt)) ? Number(run.startAt) : 0;
+  const trace = Array.isArray(run?.trace) ? run.trace : [];
+  if (!run?.localPractice || run.daily || run.soloClock || !run.typed) {
+    return { startAt, soloClock: Boolean(run?.soloClock), trace, armed: false };
+  }
+  const at = Number.isFinite(Number(now)) ? Number(now) : 0;
+  return { startAt: at, soloClock: true, trace: [{ t: 0, i: 0 }], armed: true };
 }
 
 export function soloFinish({ sentence, startAt, now, ok, err, mode, length, passageId, format, chars } = {}) {

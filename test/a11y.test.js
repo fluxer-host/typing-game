@@ -87,7 +87,9 @@ test("the page title follows the race phase and not the hostname", () => {
   assert.equal(countCue(-650, false), "");
   assert.equal(countCue(-100, true), "");
   assert.equal(countCue(2500, true), "");
-  assert.match(app, /countCue\(left, Boolean\(state\.daily\)\)/);
+  assert.match(app, /countCue\(left, Boolean\(state\.localPractice\)\)/);
+  assert.match(app, /takeSoloClock\(state, serverNow\(\)\)/);
+  assert.match(app, /practiceTimedWaiting\(state\)/);
 });
 
 test("every text colour in the palette clears WCAG AA", () => {

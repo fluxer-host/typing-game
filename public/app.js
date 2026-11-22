@@ -36,8 +36,9 @@ import {
   presentTimedSteps,
   raceMetaFor,
   rememberRaceMeta,
-  remainingMs,
+  practiceTimedWaiting,
   resultFormatLine,
+  timedDisplayLeft,
   timedHeadline,
   timerModel,
 } from "./race-format.js";
@@ -53,7 +54,7 @@ import {
   saveHistory,
   serverRaceRow,
 } from "./history.js";
-import { soloFinish, soloStart } from "./solo.js";
+import { soloClockWaiting, soloFinish, soloStart, takeSoloClock } from "./solo.js";
 import { renderSoloResults } from "./solo-view.js";
 import { ensureShareMount } from "./share.js";
 import { inviteMessage, mountRoomShare, renderInvite } from "./invite.js";
@@ -209,6 +210,8 @@ const state = {
   ok: 0,
   err: 0,
   startAt: 0,
+  typingAt: null,
+  soloClock: false,
   offset: 0,
   raceId: null,
   ranked: false,
@@ -364,10 +367,21 @@ function serverNow() {
   return Date.now() + state.offset;
 }
 
+function clockWaiting() {
+  return soloClockWaiting(state) || practiceTimedWaiting(state);
+}
+
+function clockElapsed() {
+  if (clockWaiting()) return 0;
+  if (state.format === "timed" && state.kind === "practice" && !state.ranked && Number.isFinite(state.typingAt)) {
+    return serverNow() - state.typingAt;
+  }
+  return serverNow() - state.startAt;
+}
+
 function currentWpm() {
-  if (state.daily && !state.daily.clock) return 0;
-  const elapsed = serverNow() - state.startAt;
-  if (elapsed < 400) return 0;
+  const elapsed = clockElapsed();
+  if (clockWaiting() || elapsed < 400) return 0;
   return wpm(matchCount(state.typed, state.sentence), elapsed);
 }
 
@@ -1399,8 +1413,8 @@ function paintPassage() {
 function paintStats() {
   const node = document.getElementById("stats");
   if (!node) return;
-  const waiting = Boolean(state.daily && !state.daily.clock);
-  const elapsed = waiting ? 0 : serverNow() - state.startAt;
+  const waiting = clockWaiting();
+  const elapsed = clockElapsed();
   const correct = matchCount(state.typed, state.sentence);
   const started = (state.phase === "race" || state.phase === "finishing") && !waiting;
   if (started && elapsed >= 0) {
@@ -1451,6 +1465,7 @@ function paintRaceNote() {
         ? `${clock} A better finish replaces today's score.`
         : `${clock} This finish is the scored attempt for today.`;
   }
+  else if (clockWaiting()) text = "The clock starts when you type.";
   else if (others.some((row) => row.status === "forfeit" || row.status === "disconnect")) text = "Opponent left.";
   else if (others.some((row) => row.status === "timeout")) text = "Opponent timed out.";
   else if (others.some((row) => row.status === "away")) text = "Opponent reconnecting.";
@@ -1714,6 +1729,12 @@ function commitTyping(effect) {
       stampDailyInput();
     }
   }
+  const clock = takeSoloClock(state, serverNow());
+  if (clock.armed) {
+    state.startAt = clock.startAt;
+    state.soloClock = true;
+    state.trace = clock.trace;
+  }
   if (state.localPractice && state.phase === "finishing") {
     if (state.daily) finishDailyRace();
     else finishSolo();
@@ -1722,6 +1743,7 @@ function commitTyping(effect) {
   paintPassage();
   paintStats();
   paintLocked();
+  paintRaceNote();
   localLane();
 }
 
@@ -2037,7 +2059,7 @@ function paintTimedClock() {
   const label = document.getElementById("timed-remaining");
   const fill = document.getElementById("timed-fill");
   if (!label || !fill) return;
-  const model = timerModel(remainingMs(state.startAt, state.durationMs, serverNow()), state.durationMs);
+  const model = timerModel(timedDisplayLeft(state, serverNow()), state.durationMs);
   label.textContent = model.done ? "0s" : `${model.label} left`;
   fill.style.width = `${model.percent}%`;
 }
@@ -2398,6 +2420,8 @@ function startMatch(msg) {
   state.err = 0;
   state.shift = false;
   state.startAt = msg.startAt;
+  state.typingAt = null;
+  state.soloClock = false;
   state.offset = (msg.serverNow || Date.now()) - Date.now();
   state.raceId = msg.raceId;
   state.mode = msg.mode;
@@ -2536,6 +2560,7 @@ function abandonLostRace() {
 function absorbHello(msg) {
   state.sentence = msg.sentence;
   state.startAt = msg.startAt;
+  noteTypingAt(msg);
   state.offset = msg.serverNow - Date.now();
   state.mode = msg.mode;
   if (msg.length) state.length = msg.length;
@@ -2582,15 +2607,23 @@ function absorbHello(msg) {
   else focusCapture();
 }
 
+function noteTypingAt(msg) {
+  if (!msg || !Object.prototype.hasOwnProperty.call(msg, "typingAt")) return;
+  state.typingAt = Number.isFinite(msg.typingAt) ? msg.typingAt : null;
+}
+
 function absorbState(msg) {
   if (state.forfeitedLocally) return;
   if (msg.serverNow) state.offset = msg.serverNow - Date.now();
+  noteTypingAt(msg);
   state.live = msg.players || [];
   const mine = myLive();
   if (mine?.finishedAt) state.phase = state.phase === "results" ? "results" : "finishing";
   if (state.shell === "race") {
     paintLocked();
     paintLanes();
+    paintStats();
+    paintTimedClock();
     paintRaceNote();
   }
   noteFinishes();
@@ -2642,6 +2675,8 @@ function exitToLobby() {
   state.raceId = null;
   state.kind = null;
   state.localPractice = false;
+  state.soloClock = false;
+  state.typingAt = null;
   state.soloSaved = false;
   state.passageId = "";
   state.soloRun = null;
@@ -2854,7 +2889,7 @@ setInterval(() => {
   const count = document.getElementById("count");
   if (!count) return;
   const left = state.startAt - serverNow();
-  const cue = countCue(left, Boolean(state.daily));
+  const cue = countCue(left, Boolean(state.localPractice));
   if (cue) {
     showCount(count, cue);
     if (cue === "go") beginRace();
@@ -3078,6 +3113,8 @@ function dropLocalSession() {
   state.recent = [];
   state.recentError = "";
   state.localPractice = false;
+  state.soloClock = false;
+  state.typingAt = null;
   state.soloSaved = false;
   state.passageId = "";
   state.soloRun = null;
@@ -3260,7 +3297,7 @@ function changeBot() {
 }
 
 function noteHumanTrace() {
-  if (!state.localPractice) return;
+  if (!state.localPractice || soloClockWaiting(state)) return;
   const elapsed = Math.max(0, serverNow() - state.startAt);
   const index = state.typed.length;
   state.trace = noteSample(state.trace, elapsed, index);
@@ -3274,6 +3311,7 @@ function opponentRow() {
 
 function tickVersus() {
   if (!state.localPractice || !state.versus || state.phase !== "race") return;
+  if (soloClockWaiting(state)) return;
   noteHumanTrace();
   const row = opponentRow();
   if (!row || row.finishedAt) return;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { soloStart } from "../public/solo.js";
+import { soloClockWaiting, soloStart, takeSoloClock } from "../public/solo.js";
 import { botOpponent, compareRace, ghostOpponent } from "../public/versus.js";
 
 test("a fresh solo start has no opponent", () => {
@@ -9,6 +9,19 @@ test("a fresh solo start has no opponent", () => {
   assert.equal(patch.kind, "practice");
   assert.equal(patch.ranked, false);
   assert.equal(patch.players.length, 1);
+  assert.equal(patch.soloClock, false);
+  assert.equal(soloClockWaiting(patch), true);
+  const armed = takeSoloClock({ ...patch, typed: "a", trace: [{ t: 0, i: 0 }] }, 80);
+  assert.equal(armed.armed, true);
+  assert.equal(armed.startAt, 80);
+  assert.equal(armed.soloClock, true);
+  assert.equal(soloClockWaiting({ ...patch, soloClock: true }), false);
+  const daily = soloClockWaiting({ localPractice: true, daily: { clock: false }, soloClock: false });
+  assert.equal(daily, true);
+  assert.equal(soloClockWaiting({ localPractice: false, soloClock: false }), false);
+  const shared = takeSoloClock({ localPractice: false, typed: "a", startAt: 10 }, 80);
+  assert.equal(shared.armed, false);
+  assert.equal(shared.startAt, 10);
 });
 
 test("the result names the winner and the margin", () => {

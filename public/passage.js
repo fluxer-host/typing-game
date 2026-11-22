@@ -43,9 +43,10 @@ export function missLabel(ch) {
 }
 
 // Shared races count 3, 2, 1, then show "go" for 650ms after startAt.
-// The daily challenge has no shared start, so it shows none of that overlay.
-export function countCue(leftMs, daily) {
-  if (daily) return "";
+// A local run has no shared start. The clock waits for the first key, so
+// the overlay stays hidden.
+export function countCue(leftMs, local) {
+  if (local) return "";
   const left = Number(leftMs);
   if (!Number.isFinite(left)) return "";
   if (left > 2000) return "3";

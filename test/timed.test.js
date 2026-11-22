@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { saveStatements } from "../src/db.js";
-import { ensureTimedStream, pullTimedReveal } from "../src/timed-race.js";
+import { ensureTimedStream, prepareUnrankedInit, pullTimedReveal } from "../src/timed-race.js";
 import { settingsForKind } from "../src/formats.js";
 import { planRating } from "../src/rating.js";
 import {
@@ -13,8 +13,11 @@ import {
   openStream,
   revealFor,
   reviewTimedSubmission,
+  SOLO_READ_MS,
+  timedAlarmDue,
   timedAlarmPlan,
 } from "../src/timed.js";
+import { practiceTimedWaiting, timedDisplayLeft } from "../public/race-format.js";
 
 const pool = [
   { id: "a", text: "a".repeat(100) },
@@ -241,6 +244,72 @@ test("a late timed alarm does not seal a race that already ended", () => {
   live.results = { rows: [] };
   assert.equal(timedAlarmPlan(live, 40000), "ended");
   assert.equal(timedAlarmPlan({ format: "passage", results: null, startAt: 0, durationMs: 30000 }, 99999), "ignore");
+  const solo = { format: "timed", kind: "practice", ranked: false, startAt: 1000, durationMs: 30000, results: null };
+  assert.equal(timedAlarmDue(solo), 1000 + SOLO_READ_MS);
+  assert.equal(timedAlarmPlan(solo, 1000 + 30000), "continue");
+  assert.equal(timedAlarmPlan({ ...solo, typingAt: 5000 }, 5000 + 30000), "seal");
+  const held = reviewTimedSubmission({
+    stream: "hello",
+    previous: "",
+    next: "h",
+    elapsedMs: 30000 + 5,
+    recentStrokes: 0,
+    priorStrokes: 0,
+    kind: "prog",
+    now: 1000 + 30000 + 5,
+    startAt: 1000,
+    durationMs: 30000,
+    ended: false,
+    solo: true,
+  });
+  assert.equal(held.ok, true);
+  const closed = reviewTimedSubmission({
+    stream: "hello",
+    previous: "h",
+    next: "he",
+    elapsedMs: 40000,
+    recentStrokes: 0,
+    priorStrokes: 1,
+    kind: "prog",
+    now: 5000 + 30000 + 1,
+    startAt: 1000,
+    durationMs: 30000,
+    ended: false,
+    typingAt: 5000,
+    solo: true,
+  });
+  assert.equal(closed.reason, "closed");
+  const room = prepareUnrankedInit({
+    format: "timed",
+    kind: "room",
+    mode: "desktop",
+    length: "sprint",
+    durationMs: 30000,
+    players: [{ id: "a" }, { id: "b" }],
+    sentence: "ignored",
+  });
+  assert.equal(room.limitMs, 30000);
+  const practice = prepareUnrankedInit({
+    format: "timed",
+    kind: "practice",
+    mode: "desktop",
+    length: "sprint",
+    durationMs: 30000,
+    players: [{ id: "a" }],
+    sentence: "ignored",
+  });
+  assert.equal(practice.limitMs, 30000 + SOLO_READ_MS);
+  assert.equal(practiceTimedWaiting({ format: "timed", kind: "practice", ranked: false, typingAt: null }), true);
+  assert.equal(timedDisplayLeft({ format: "timed", kind: "practice", ranked: false, durationMs: 30000, startAt: 1000 }, 9000), 30000);
+  assert.equal(timedDisplayLeft({
+    format: "timed",
+    kind: "practice",
+    ranked: false,
+    durationMs: 30000,
+    typingAt: 5000,
+    startAt: 1000,
+  }, 8000), 27000);
+  assert.equal(timedDisplayLeft({ format: "timed", kind: "room", ranked: false, durationMs: 30000, startAt: 1000 }, 6000), 25000);
 });
 
 test("the ranked queue ignores a timed or punctuation request", () => {

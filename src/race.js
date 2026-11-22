@@ -10,7 +10,7 @@ import { applyRaceEvent, nextAlarmAt, raceStanding } from "./race-end.js";
 import { buildResults } from "./results.js";
 import { readFormat } from "./formats.js";
 import { ensureTimedStream, prepareUnrankedInit, pullTimedReveal, timedLimitAction } from "./timed-race.js";
-import { reviewTimedSubmission, timedAlarmPlan } from "./timed.js";
+import { reviewTimedSubmission, soloTimedPractice, timedAlarmDue, timedAlarmPlan } from "./timed.js";
 import {
   ALARM_COALESCE_MS,
   PROGRESS_CHECKPOINT_MS,
@@ -132,6 +132,7 @@ export class Race {
         const progress = this.state.progress[player.id] || {};
         const dq = Boolean(progress.dq);
         const connectedNow = connected.has(player.id);
+        const holdIdle = soloTimedPractice(this.state) && !Number.isFinite(this.state.typingAt) && connectedNow;
         // Keep a missing stamp missing. Filling it with the race start made a
         // reload after the grace window look expired, even when the socket
         // had only just closed. The tick records the start for someone who
@@ -145,7 +146,7 @@ export class Race {
           dnf: Boolean(row.dnf) || dq,
           dnfReason,
           forfeitWin: Boolean(row.forfeitWin),
-          lastActivity: row.lastActivity ?? null,
+          lastActivity: holdIdle ? now : (row.lastActivity ?? null),
           connected: connectedNow,
           disconnectedAt,
         };
@@ -192,14 +193,17 @@ export class Race {
       const caret = finished ? this.state.sentence.length : text.length;
       const matched = finished ? this.state.sentence.length : matchCount(text, this.state.sentence || "");
       const end = finish?.at || now;
-      const elapsed = Math.max(0, Math.min(end, now) - this.state.startAt);
+      const origin = soloTimedPractice(this.state) && Number.isFinite(this.state.typingAt)
+        ? this.state.typingAt
+        : this.state.startAt;
+      const elapsed = Math.max(0, Math.min(end, now) - origin);
       return {
         id: player.id,
         i: caret,
         ok: (finished ? finish : progress).ok || 0,
         err: (finished ? finish : progress).err || 0,
         finishedAt: finished ? finish.at : null,
-        wpm: now < this.state.startAt ? 0 : wpm(matched, Math.max(1, elapsed)),
+        wpm: now < origin ? 0 : wpm(matched, Math.max(1, elapsed)),
         status,
       };
     });
@@ -210,6 +214,7 @@ export class Race {
       t: "state",
       serverNow: Date.now(),
       startAt: this.state.startAt,
+      typingAt: Number.isFinite(this.state.typingAt) ? this.state.typingAt : null,
       players: this.playerViews(),
     };
   }
@@ -278,6 +283,7 @@ export class Race {
       sentence,
       ...extra,
       startAt,
+      typingAt: null,
       players,
       progress: {},
       finishes: {},
@@ -297,6 +303,7 @@ export class Race {
       raceId: this.state.raceId,
       sentence: this.state.sentence,
       startAt: this.state.startAt,
+      typingAt: Number.isFinite(this.state.typingAt) ? this.state.typingAt : null,
       serverNow: Date.now(),
       mode: this.state.mode,
       length: this.state.length || "sprint",
@@ -399,6 +406,8 @@ export class Race {
         startAt: this.state.startAt,
         durationMs: this.state.durationMs || this.state.limitMs,
         ended: Boolean(this.state.results),
+        typingAt: this.state.typingAt,
+        solo: soloTimedPractice(this.state),
       })
       : validateProgress({
         passage: this.state.sentence,
@@ -441,6 +450,9 @@ export class Race {
       }
       this.send(ws, { t: "sync", ...sync });
       return;
+    }
+    if (soloTimedPractice(this.state) && !Number.isFinite(this.state.typingAt) && typeof verdict.text === "string" && verdict.text.length > 0) {
+      this.state.typingAt = now;
     }
     progress.text = verdict.text;
     progress.i = verdict.index;
@@ -543,6 +555,8 @@ export class Race {
     if (!this.state || this.state.results) return;
     const now = Date.now();
     let when = nextAlarmAt(this.decisionState(now), now);
+    const clockDue = timedAlarmDue(this.state);
+    if (Number.isFinite(clockDue)) when = Math.min(when, clockDue);
     if (this.progressDirty) {
       const due = (this.lastProgressWrite || 0) + PROGRESS_CHECKPOINT_MS;
       when = Math.min(when, due);
@@ -572,6 +586,16 @@ export class Race {
       const action = timedAlarmPlan(this.state, now);
       if (action === "ended") {
         if (!this.state.saved && !this.state.results.cancelled) await this.writeResults();
+        return;
+      }
+      if (action === "seal") {
+        this.state.timeUp = true;
+        const standing = this.currentEnd(now);
+        if (timedLimitAction(standing) === "cancel") {
+          await this.cancel();
+          return;
+        }
+        await this.finalize();
         return;
       }
     }

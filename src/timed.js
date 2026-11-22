@@ -135,9 +135,32 @@ export function revealFor(state, cursor, pool, options = {}) {
   return { grew, sentence: state.text.slice(0, state.revealed) };
 }
 
-export function timedInputOpen({ now, startAt, durationMs, ended }) {
+// A solo timed practice can sit this long before the first key. After that
+// the duration still runs for its full length. Rooms keep the shared start.
+export const SOLO_READ_MS = 240_000;
+
+export function soloTimedPractice(state) {
+  return Boolean(state && state.format === "timed" && state.kind === "practice" && !state.ranked);
+}
+
+export function timedAlarmDue(state) {
+  if (!state || state.format !== "timed" || state.results) return null;
+  const duration = Number(state.durationMs || state.limitMs);
+  if (!Number.isFinite(state.startAt) || !Number.isFinite(duration)) return null;
+  if (soloTimedPractice(state)) {
+    if (!Number.isFinite(state.typingAt)) return state.startAt + SOLO_READ_MS;
+    return state.typingAt + duration;
+  }
+  return state.startAt + duration;
+}
+
+export function timedInputOpen({ now, startAt, durationMs, ended, typingAt = null, solo = false }) {
   if (ended) return false;
   if (!Number.isFinite(now) || !Number.isFinite(startAt) || !Number.isFinite(durationMs)) return false;
+  if (solo) {
+    if (!Number.isFinite(typingAt)) return now >= startAt && now <= startAt + SOLO_READ_MS;
+    return now <= typingAt + durationMs;
+  }
   return now <= startAt + durationMs;
 }
 
@@ -155,9 +178,11 @@ export function reviewTimedSubmission({
   startAt,
   durationMs,
   ended,
+  typingAt = null,
+  solo = false,
 }) {
   if (ended) return { ok: false, reason: "ended", disqualify: false };
-  if (!timedInputOpen({ now, startAt, durationMs, ended: false })) {
+  if (!timedInputOpen({ now, startAt, durationMs, ended: false, typingAt, solo })) {
     return { ok: false, reason: "closed", disqualify: false };
   }
   return validateProgress({
@@ -174,8 +199,8 @@ export function reviewTimedSubmission({
 export function timedAlarmPlan(state, now) {
   if (!state || state.format !== "timed") return "ignore";
   if (state.results) return "ended";
-  const duration = Number(state.durationMs || state.limitMs);
-  if (Number.isFinite(state.startAt) && Number.isFinite(duration) && now >= state.startAt + duration) return "seal";
+  const due = timedAlarmDue(state);
+  if (Number.isFinite(due) && now >= due) return "seal";
   return "continue";
 }
 
@@ -220,7 +245,8 @@ export function rankTimed(rows) {
 
 export function buildTimedResults(state, now) {
   const durationMs = Number(state.durationMs || state.limitMs) || 0;
-  const timeUp = Boolean(state.timeUp) || (Number.isFinite(now) && Number.isFinite(state.startAt) && now >= state.startAt + durationMs);
+  const due = timedAlarmDue({ ...state, results: null });
+  const timeUp = Boolean(state.timeUp) || (Number.isFinite(due) && Number.isFinite(now) && now >= due);
   const prepared = (state.players || []).map((player) => {
     const progress = state.progress?.[player.id] || { i: 0, ok: 0, err: 0, text: "" };
     const presence = state.presence?.[player.id] || {};
