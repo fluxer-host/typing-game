@@ -318,9 +318,10 @@ export function applyTyping(state, effect) {
 }
 
 function stepFor(current, target) {
+  const reached = target.length > 0 && current.length === target.length;
   return {
-    kind: current === target ? "fin" : "prog",
+    kind: reached ? "fin" : "prog",
     text: current,
-    reached: current.length === target.length,
+    reached,
   };
 }

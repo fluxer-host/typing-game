@@ -1764,7 +1764,7 @@ function applyServerText(msg) {
   state.typed = msg.text;
   if (Number.isFinite(msg.ok)) state.ok = msg.ok;
   if (Number.isFinite(msg.err)) state.err = msg.err;
-  if (state.phase === "finishing" && state.typed !== state.sentence) state.phase = "race";
+  if (state.phase === "finishing" && state.typed.length < state.sentence.length) state.phase = "race";
   paintPassage();
   paintStats();
   paintLocked();

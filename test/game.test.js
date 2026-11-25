@@ -241,7 +241,7 @@ test("verified typing accepts one character at a time and counts mistakes", () =
   }
 
   const wrong = validateProgress({
-    passage: "ab",
+    passage: "abc",
     previous: "a",
     next: "ax",
     elapsedMs: 80,
@@ -253,6 +253,30 @@ test("verified typing accepts one character at a time and counts mistakes", () =
   assert.equal(wrong.index, 1);
   assert.equal(wrong.errDelta, 1);
   assert.equal(wrong.finished, false);
+  const ended = validateProgress({
+    passage: "ab",
+    previous: "a",
+    next: "ax",
+    elapsedMs: 80,
+    recentStrokes: 1,
+    priorStrokes: 1,
+    kind: "fin",
+  });
+  assert.equal(ended.ok, true);
+  assert.equal(ended.finished, true);
+  assert.equal(ended.errDelta, 1);
+  const skippedEnd = validateProgress({
+    passage: "hi",
+    previous: "",
+    next: wordSkipText("hi", ""),
+    elapsedMs: 80,
+    recentStrokes: 0,
+    priorStrokes: 0,
+    kind: "fin",
+  });
+  assert.equal(skippedEnd.ok, true);
+  assert.equal(skippedEnd.finished, true);
+  assert.equal(skippedEnd.errDelta, 2);
   const back = validateProgress({
     passage: "ab",
     previous: "ax",
@@ -908,6 +932,15 @@ test("accented input matches the passage after NFC and finishes once", () => {
   assert.equal(typed.err, 0);
   assert.equal(typed.finished, true);
   assert.equal(typed.steps.at(-1).kind, "fin");
+  const missedEnd = applyTyping(
+    { typed: "a", sentence: "ab", ok: 1, err: 0 },
+    { effect: "insert", chars: ["x"] },
+  );
+  assert.equal(missedEnd.typed, "ax");
+  assert.equal(missedEnd.finished, true);
+  assert.equal(missedEnd.reached, true);
+  assert.equal(missedEnd.steps.at(-1).kind, "fin");
+  assert.equal(missedEnd.err, 1);
   assert.equal(correctLength(typed.typed, "cafe\u0301"), 4);
   assert.equal(correctLength("I love", "I love Fluxer"), legacyCorrectLength("I love", "I love Fluxer"));
   assert.equal(correctLength("Ix", "I love"), legacyCorrectLength("Ix", "I love"));

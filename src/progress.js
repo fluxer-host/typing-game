@@ -76,6 +76,9 @@ export function validateProgress({ passage, previous, next, elapsedMs, recentStr
   const minElapsed = prior * (RATE_WINDOW_MS / MAX_KEYSTROKES_PER_SECOND);
   if (recent >= MAX_KEYSTROKES_PER_SECOND || elapsedMs < minElapsed) return reject("rate", true);
 
+  // The last character completes the race. A miss still counts, so the
+  // typist does not have to repair the line before the result is recorded.
+  const finished = passage.length > 0 && next.length === passage.length;
   if (skip) {
     const added = next.slice(previous.length);
     let missed = 0;
@@ -88,7 +91,7 @@ export function validateProgress({ passage, previous, next, elapsedMs, recentStr
       ok: true,
       text: next,
       index: correctIndex(next, passage),
-      finished: false,
+      finished,
       okDelta: space,
       errDelta: missed,
     };
@@ -99,7 +102,7 @@ export function validateProgress({ passage, previous, next, elapsedMs, recentStr
     ok: true,
     text: next,
     index: correctIndex(next, passage),
-    finished: next === passage,
+    finished,
     okDelta: correct ? 1 : 0,
     errDelta: typed && !correct ? 1 : 0,
   };
