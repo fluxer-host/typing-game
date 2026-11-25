@@ -92,6 +92,7 @@ import {
   countdownText,
   dailyAnnounce,
   dailyBoardPath,
+  dailyCardNumbers,
   dailyClockDay,
   dailyMeta,
   dailyYouText,
@@ -3512,17 +3513,23 @@ async function beginDaily(options = {}) {
 }
 
 function dailyResultNumbers() {
-  const run = state.soloRun || {};
   const server = state.daily?.server;
-  if (server && state.daily?.scored) {
-    return {
-      wpm: server.wpm,
-      accuracy: server.accuracy,
-      ms: server.ms,
+  let attempt = null;
+  if (server && Number.isFinite(Number(server.attemptWpm))) {
+    attempt = {
+      wpm: server.attemptWpm,
+      accuracy: server.attemptAccuracy,
+      ms: server.attemptMs,
       rank: server.rank,
     };
+  } else if (server && state.daily?.scored) {
+    attempt = { wpm: server.wpm, accuracy: server.accuracy, ms: server.ms, rank: server.rank };
   }
-  return { wpm: run.wpm || 0, accuracy: run.accuracy || 0, ms: run.ms || 0, rank: null };
+  return dailyCardNumbers({
+    pending: Boolean(state.daily?.pending),
+    local: state.soloRun,
+    attempt,
+  });
 }
 
 function dailyResultView() {
@@ -3600,10 +3607,11 @@ function finishDailyRace() {
     return;
   }
   state.soloSaved = true;
+  const finishedAt = serverNow();
   const run = soloFinish({
     sentence: state.sentence,
     startAt: state.startAt,
-    now: serverNow(),
+    now: finishedAt,
     ok: state.ok,
     err: state.err,
     mode: state.mode,
@@ -3631,7 +3639,7 @@ function finishDailyRace() {
   }
   daily.pending = true;
   showDailyResults();
-  fetchDaily("/api/daily/submit", { attemptId: daily.attemptId, steps: daily.steps.slice() })
+  fetchDaily("/api/daily/submit", { attemptId: daily.attemptId, steps: daily.steps.slice(), finishedAt })
     .then((result) => {
       daily.pending = false;
       if (result.ok && result.data?.scored) {

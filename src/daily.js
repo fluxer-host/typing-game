@@ -310,6 +310,30 @@ export function dailyScoreElapsed({ startedAt, firstInputAt, now } = {}) {
   return at - start;
 }
 
+// The official clock stops at the last key when that instant sits between
+// the first-key stamp and the submit arrival, and is no faster than the
+// rate floor. A missing stamp, or a bad claim, keeps the arrival time.
+// origin is null when the server has no stamp inside the attempt, so a
+// claim cannot erase the reading time before Play's clock.
+export function dailyScoringInstant({ origin, arrival, claimed, strokes } = {}) {
+  if (!Number.isFinite(arrival)) return null;
+  const count = Number(strokes);
+  const steps = Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
+  const min = Math.max(0, steps - 1) * strokeGapMs();
+  // Number(null) is 0, so a missing stamp has to stay missing. A claim
+  // against that zero would erase the time before the first key.
+  if (
+    Number.isFinite(origin)
+    && Number.isFinite(claimed)
+    && claimed >= origin
+    && claimed <= arrival
+    && claimed - origin >= min
+  ) {
+    return claimed;
+  }
+  return arrival;
+}
+
 export function parseSubmitBody(value) {
   const attempt = parseAttemptBody(value);
   if (!attempt.ok) return attempt;
@@ -321,7 +345,9 @@ export function parseSubmitBody(value) {
     if (typeof step !== "string" || step.length > 500) return { ok: false, error: "steps" };
     steps.push(step);
   }
-  return { ok: true, attemptId: attempt.attemptId, steps };
+  const claimed = value.finishedAt;
+  const finishedAt = typeof claimed === "number" && Number.isFinite(claimed) ? claimed : undefined;
+  return { ok: true, attemptId: attempt.attemptId, steps, finishedAt };
 }
 
 export function strokeGapMs() {

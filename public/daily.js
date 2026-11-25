@@ -129,6 +129,28 @@ export function dailyKeptCopy(wpm) {
   return `Today's score stays at ${Number(wpm).toFixed(1)} WPM. This run does not replace it.`;
 }
 
+// While the save is in flight the card shows the local pace. Once the
+// server has judged the run, the big numbers are that attempt.
+export function dailyCardNumbers({ pending, local, attempt } = {}) {
+  const wpm = Number(attempt?.wpm);
+  const ms = Number(attempt?.ms);
+  if (!pending && Number.isFinite(wpm) && Number.isFinite(ms)) {
+    const rank = Number(attempt.rank);
+    return {
+      wpm,
+      accuracy: Number(attempt.accuracy) || 0,
+      ms,
+      rank: Number.isFinite(rank) && rank > 0 ? rank : null,
+    };
+  }
+  return {
+    wpm: Number(local?.wpm) || 0,
+    accuracy: Number(local?.accuracy) || 0,
+    ms: Number(local?.ms) || 0,
+    rank: null,
+  };
+}
+
 export function dailyAnnounce({ practice, pending, rejected, kept, standingWpm, wpm, accuracy, ms, rank, signedIn }) {
   if (pending) return "Saving today's score.";
   const seconds = (Number(ms) / 1000).toFixed(1);

@@ -13,6 +13,7 @@ import {
   DAILY_STARTS_PER_DAY,
   dailyPassage,
   dailyScoreElapsed,
+  dailyScoringInstant,
   dailySpanWindow,
   dayAllowed,
   isBetterDailyScore,
@@ -30,7 +31,7 @@ import {
   submissionWindow,
   utcDayString,
 } from "../src/daily.js";
-import { dailyBoard, dailyStart, dailySubmit } from "../src/daily-http.js";
+import { dailyBoard, dailyInput, dailyStart, dailySubmit } from "../src/daily-http.js";
 import {
   insertDailyAttempt,
   insertDailyResult,
@@ -44,6 +45,7 @@ import {
 import { signPayload } from "../src/session.js";
 import {
   dailyAnnounce,
+  dailyCardNumbers,
   dailyKeptCopy,
   loadDailyLocal,
   noteDailyStep,
@@ -246,7 +248,13 @@ test("a submit body keeps the typed steps and drops a client wpm", () => {
   const parsed = parseSubmitBody({ attemptId: id, steps: ["a", "ab"], wpm: 9999, accuracy: 1 });
   assert.equal(parsed.ok, true);
   assert.equal(parsed.wpm, undefined);
+  assert.equal(parsed.finishedAt, undefined);
   assert.deepEqual(parsed.steps, ["a", "ab"]);
+  const claimed = parseSubmitBody({ attemptId: id, steps: ["a"], finishedAt: 1_700_000_000_000, wpm: 9 });
+  assert.equal(claimed.finishedAt, 1_700_000_000_000);
+  assert.equal(claimed.wpm, undefined);
+  assert.equal(parseSubmitBody({ attemptId: id, steps: ["a"], finishedAt: "soon" }).finishedAt, undefined);
+  assert.equal(parseSubmitBody({ attemptId: id, steps: ["a"], finishedAt: null }).finishedAt, undefined);
   assert.equal(parseSubmitBody({ attemptId: "nope", steps: ["a"] }).error, "attempt");
   assert.equal(parseSubmitBody({ attemptId: id, steps: Array(DAILY_MAX_STEPS + 1).fill("a") }).error, "steps");
   assert.equal(parseSubmitBody({ attemptId: id, steps: ["x".repeat(501)] }).error, "steps");
@@ -433,6 +441,8 @@ test("the daily clock starts at the first key and the attempt still expires from
   assert.equal(submitted.status, 200);
   assert.equal(submitted.body.improved, true);
   assert.equal(submitted.body.ms, typedMs);
+  assert.equal(submitted.body.attemptMs, typedMs);
+  assert.equal(submitted.body.attemptWpm, submitted.body.wpm);
   assert.equal(submitted.body.wpm, wpm(started.body.passage.length, typedMs));
   const row = db.prepare(
     "SELECT duration_ms, first_input_at FROM daily_results r JOIN daily_attempts a ON a.user_id = r.user_id AND a.ladder = r.ladder AND a.day = r.day WHERE a.id = ?",
@@ -458,6 +468,226 @@ test("the daily clock starts at the first key and the attempt still expires from
   const used = await markDailyFirstInput(env, { user, attemptId: started.body.attemptId, now: firstAt + typedMs + 1 });
   assert.equal(used.status, 409);
   assert.equal(used.body.error, "used");
+});
+
+test("the official daily clock stops at a last-key claim inside the stamp window", async () => {
+  const origin = 10_000;
+  const arrival = 13_000;
+  assert.equal(dailyScoringInstant({ origin, arrival, claimed: arrival - 400, strokes: 20 }), arrival - 400);
+  assert.equal(dailyScoringInstant({ origin, arrival, claimed: arrival + 1, strokes: 20 }), arrival);
+  assert.equal(dailyScoringInstant({ origin, arrival, claimed: origin - 1, strokes: 20 }), arrival);
+  assert.equal(dailyScoringInstant({ origin, arrival, claimed: origin + 10, strokes: 20 }), arrival);
+  assert.equal(dailyScoringInstant({ origin: null, arrival, claimed: origin + 800, strokes: 20 }), arrival);
+  assert.equal(dailyScoringInstant({ origin, arrival, claimed: "soon", strokes: 20 }), arrival);
+  assert.equal(dailyScoringInstant({ origin, arrival, strokes: 20 }), arrival);
+
+  const { env, db } = sqliteEnv();
+  const user = { id: "ada", username: "ada", global_name: "Ada" };
+  await addUser(env, user.id, { globalName: "Ada" });
+
+  async function stamped(ladder, startedAt, { readMs, extraMs, finishedAt }) {
+    const started = await startDailyAttempt(env, { user, ladder, now: startedAt });
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    const steps = stepsForPassage(started.body.passage);
+    const firstAt = startedAt + readMs;
+    const marked = await markDailyFirstInput(env, { user, attemptId: started.body.attemptId, now: firstAt });
+    assert.equal(marked.status, 200);
+    const arrivalAt = firstAt + (steps.length - 1) * gap() + extraMs;
+    const claimed = typeof finishedAt === "function" ? finishedAt({ firstAt, arrivalAt, steps }) : finishedAt;
+    const submitted = await submitDailyAttempt(env, {
+      user,
+      attemptId: started.body.attemptId,
+      steps,
+      now: arrivalAt,
+      finishedAt: claimed,
+    });
+    return { started, steps, firstAt, arrivalAt, submitted };
+  }
+
+  const slow = await stamped("desktop", Date.parse("2026-10-18T12:00:00.000Z"), {
+    readMs: 20_000,
+    extraMs: 8_000,
+  });
+  assert.equal(slow.submitted.status, 200);
+  assert.equal(slow.submitted.body.improved, true);
+  const slowElapsed = slow.arrivalAt - slow.firstAt;
+  assert.equal(slow.submitted.body.attemptMs, slowElapsed);
+  assert.equal(slow.submitted.body.ms, slowElapsed);
+
+  const fast = await stamped("desktop", slow.arrivalAt + 1_000, {
+    readMs: 4_000,
+    extraMs: 400,
+    finishedAt: ({ arrivalAt }) => arrivalAt - 400,
+  });
+  const fastElapsed = (fast.steps.length - 1) * gap();
+  assert.equal(fast.submitted.status, 200);
+  assert.equal(fast.submitted.body.improved, true);
+  assert.equal(fast.submitted.body.attemptMs, fastElapsed);
+  assert.equal(fast.submitted.body.ms, fastElapsed);
+  assert.equal(fast.submitted.body.attemptWpm, wpm(fast.started.body.passage.length, fastElapsed));
+  assert.equal(fast.submitted.body.wpm, fast.submitted.body.attemptWpm);
+  assert.equal(fast.submitted.body.attemptAccuracy, fast.submitted.body.accuracy);
+  assert.ok(fast.submitted.body.wpm > slow.submitted.body.wpm);
+  const saved = db.prepare(
+    "SELECT duration_ms, finished_at, created_at FROM daily_results WHERE user_id = ? AND ladder = ? AND day = ?",
+  ).get(user.id, "desktop", "2026-10-18");
+  assert.equal(saved.duration_ms, fastElapsed);
+  assert.equal(saved.finished_at, fast.arrivalAt - 400);
+  assert.equal(saved.created_at, fast.arrivalAt);
+
+  const future = await stamped("desktop", fast.arrivalAt + 1_000, {
+    readMs: 3_000,
+    extraMs: 10_000,
+    finishedAt: ({ arrivalAt }) => arrivalAt + 500,
+  });
+  assert.equal(future.submitted.status, 200);
+  assert.equal(future.submitted.body.improved, false);
+  assert.equal(future.submitted.body.wpm, fast.submitted.body.wpm);
+  assert.equal(future.submitted.body.attemptMs, future.arrivalAt - future.firstAt);
+
+  const before = await stamped("desktop", future.arrivalAt + 1_000, {
+    readMs: 3_000,
+    extraMs: 10_000,
+    finishedAt: ({ firstAt }) => firstAt - 10,
+  });
+  assert.equal(before.submitted.status, 200);
+  assert.equal(before.submitted.body.improved, false);
+  assert.equal(before.submitted.body.attemptMs, before.arrivalAt - before.firstAt);
+
+  const rushed = await stamped("desktop", before.arrivalAt + 1_000, {
+    readMs: 3_000,
+    extraMs: 10_000,
+    finishedAt: ({ firstAt, steps }) => firstAt + (steps.length - 1) * gap() - 1,
+  });
+  assert.equal(rushed.submitted.status, 200);
+  assert.equal(rushed.submitted.body.improved, false);
+  assert.equal(rushed.submitted.body.attemptMs, rushed.arrivalAt - rushed.firstAt);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").duration_ms, fastElapsed);
+  assert.equal(storedScore(db, user.id, "desktop", "2026-10-18").created_at, fast.arrivalAt);
+
+  const bareStart = rushed.arrivalAt + 1_000;
+  const bare = await startDailyAttempt(env, { user, ladder: "mobile", now: bareStart });
+  assert.equal(bare.status, 200);
+  const bareSteps = stepsForPassage(bare.body.passage);
+  const bareArrival = bareStart + 30_000;
+  const bareClaim = bareStart + (bareSteps.length - 1) * gap() + 1_000;
+  const bareSubmit = await submitDailyAttempt(env, {
+    user,
+    attemptId: bare.body.attemptId,
+    steps: bareSteps,
+    now: bareArrival,
+    finishedAt: bareClaim,
+  });
+  assert.equal(bareSubmit.status, 200);
+  assert.equal(bareSubmit.body.improved, true);
+  assert.equal(bareSubmit.body.attemptMs, 30_000);
+  assert.equal(bareSubmit.body.ms, 30_000);
+  const bareRow = db.prepare(
+    "SELECT duration_ms, finished_at, created_at FROM daily_results WHERE user_id = ? AND ladder = ? AND day = ?",
+  ).get(user.id, "mobile", "2026-10-18");
+  assert.equal(bareRow.duration_ms, 30_000);
+  assert.equal(bareRow.finished_at, bareArrival);
+  assert.equal(bareRow.created_at, bareArrival);
+
+  const plainStart = bareArrival + 1_000;
+  const plain = await startDailyAttempt(env, { user, ladder: "cursor", now: plainStart });
+  assert.equal(plain.status, 200);
+  const plainSteps = stepsForPassage(plain.body.passage);
+  const plainFirst = plainStart + 6_000;
+  const plainMark = await markDailyFirstInput(env, { user, attemptId: plain.body.attemptId, now: plainFirst });
+  assert.equal(plainMark.status, 200);
+  const plainElapsed = (plainSteps.length - 1) * gap() + 50;
+  const plainSubmit = await submitDailyAttempt(env, {
+    user,
+    attemptId: plain.body.attemptId,
+    steps: plainSteps,
+    now: plainFirst + plainElapsed,
+  });
+  assert.equal(plainSubmit.status, 200);
+  assert.equal(plainSubmit.body.ms, plainElapsed);
+  assert.equal(plainSubmit.body.attemptMs, plainElapsed);
+  assert.equal(plainSubmit.body.wpm, wpm(plain.body.passage.length, plainElapsed));
+});
+
+test("a submit request stops the clock at a last-key claim", async () => {
+  const { env } = sqliteEnv();
+  const user = { id: "acct-zz9f3e", username: "ada", global_name: "Ada" };
+  await addUser(env, user.id, { globalName: "Ada" });
+  const sid = crypto.randomUUID();
+  const exp = Date.now() + DAY_MS;
+  await env.DB.prepare(
+    "INSERT INTO sessions (id, user_id, refresh_token, expires_at) VALUES (?, ?, NULL, ?)",
+  ).bind(sid, user.id, exp).run();
+  const token = await signPayload({ sid, exp }, SECRET);
+  const now = Date.parse("2026-10-18T15:00:00.000Z");
+  const start = await dailyStart(new Request("https://typing.example/api/daily/start", {
+    method: "POST",
+    headers: { cookie: `tg_session=${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ ladder: "desktop" }),
+  }), env, now);
+  assert.equal(start.status, 200);
+  const started = await start.json();
+  const steps = stepsForPassage(started.passage);
+  const firstAt = now + 4_000;
+  const marked = await dailyInput(new Request("https://typing.example/api/daily/input", {
+    method: "POST",
+    headers: { cookie: `tg_session=${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ attemptId: started.attemptId }),
+  }), env, firstAt);
+  assert.equal(marked.status, 200);
+  const elapsed = (steps.length - 1) * gap() + 400;
+  const arrival = firstAt + elapsed + 400;
+  const submit = await dailySubmit(new Request("https://typing.example/api/daily/submit", {
+    method: "POST",
+    headers: { cookie: `tg_session=${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      attemptId: started.attemptId,
+      steps,
+      finishedAt: arrival - 400,
+      wpm: 9999,
+      accuracy: 1,
+    }),
+  }), env, arrival);
+  assert.equal(submit.status, 200);
+  const saved = await submit.json();
+  assert.equal(saved.attemptMs, elapsed);
+  assert.equal(saved.ms, elapsed);
+  assert.equal(saved.wpm, wpm(started.passage.length, elapsed));
+  assert.equal(saved.attemptWpm, saved.wpm);
+  assert.notEqual(saved.wpm, 9999);
+});
+
+test("the results card shows the official attempt after the save", () => {
+  const local = { wpm: 238.5, accuracy: 100, ms: 2_400 };
+  const pending = dailyCardNumbers({
+    pending: true,
+    local,
+    attempt: { wpm: 200, accuracy: 100, ms: 2_900, rank: 2 },
+  });
+  assert.equal(pending.wpm, 238.5);
+  assert.equal(pending.ms, 2_400);
+  assert.equal(pending.rank, null);
+  const saved = dailyCardNumbers({
+    pending: false,
+    local,
+    attempt: { wpm: 238.5, accuracy: 100, ms: 2_400, rank: 1 },
+  });
+  assert.equal(saved.wpm, 238.5);
+  assert.equal(saved.ms, 2_400);
+  assert.equal(saved.accuracy, 100);
+  assert.equal(saved.rank, 1);
+  const kept = dailyCardNumbers({
+    pending: false,
+    local,
+    attempt: { wpm: 200, accuracy: 100, ms: 2_900, rank: 4 },
+  });
+  assert.equal(kept.wpm, 200);
+  assert.equal(kept.accuracy, 100);
+  assert.equal(kept.ms, 2_900);
+  assert.equal(kept.rank, 4);
+  const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(app, /dailyCardNumbers\(/);
+  assert.match(app, /steps: daily\.steps\.slice\(\), finishedAt/);
 });
 
 test("the stored daily score changes only when the finish is strictly better", async () => {

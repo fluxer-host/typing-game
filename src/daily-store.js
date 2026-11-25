@@ -12,6 +12,7 @@ import {
   DAILY_STARTS_PER_DAY,
   dailyPassage,
   dailyScoreElapsed,
+  dailyScoringInstant,
   dailySpanWindow,
   isUniqueViolation,
   passageForAttempt,
@@ -221,7 +222,7 @@ export async function markDailyFirstInput(env, { user, attemptId, now }) {
   return { status: 409, body: { error: "used" } };
 }
 
-export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
+export async function submitDailyAttempt(env, { user, attemptId, steps, now, finishedAt }) {
   const attempt = await getDailyAttempt(env, attemptId);
   if (!attempt || attempt.user_id !== user.id) return { status: 404, body: { error: "attempt" } };
   if (attempt.consumed_at != null) return { status: 409, body: { error: "used" } };
@@ -232,12 +233,32 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
   }
   const record = passageForAttempt(attempt.ladder, attempt.passage_id);
   if (!record) return { status: 400, body: { error: "passage" } };
-  const elapsedMs = dailyScoreElapsed({
-    startedAt: Number(attempt.started_at),
+  const startedAt = Number(attempt.started_at);
+  const stamped = Number(attempt.first_input_at);
+  const origin = Number.isFinite(stamped) && stamped >= startedAt && stamped <= now ? stamped : null;
+  let instant = dailyScoringInstant({
+    origin,
+    arrival: now,
+    claimed: finishedAt,
+    strokes: Array.isArray(steps) ? steps.length : 0,
+  }) ?? now;
+  let elapsedMs = dailyScoreElapsed({
+    startedAt,
     firstInputAt: attempt.first_input_at,
-    now,
+    now: instant,
   }) ?? window.elapsedMs;
-  const replay = replayDaily({ passage: record.text, steps, elapsedMs });
+  let replay = replayDaily({ passage: record.text, steps, elapsedMs });
+  // A claim that still fails the replay is dropped. The arrival time is
+  // tried next, so a bad clock cannot discard a real attempt.
+  if (!replay.ok && instant !== now) {
+    instant = now;
+    elapsedMs = dailyScoreElapsed({
+      startedAt,
+      firstInputAt: attempt.first_input_at,
+      now,
+    }) ?? window.elapsedMs;
+    replay = replayDaily({ passage: record.text, steps, elapsedMs });
+  }
   if (!replay.ok) {
     console.log(JSON.stringify({
       event: "daily_rejected",
@@ -257,8 +278,8 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
     wpm: replay.wpm,
     accuracy: replay.accuracy,
     durationMs: elapsedMs,
-    startedAt: Number(attempt.started_at),
-    finishedAt: now,
+    startedAt,
+    finishedAt: instant,
     createdAt: now,
   };
   const inserted = await insertDailyResult(env, stored);
@@ -275,6 +296,9 @@ export async function submitDailyAttempt(env, { user, attemptId, steps, now }) {
       wpm: row.wpm,
       accuracy: row.accuracy,
       ms: row.duration_ms,
+      attemptWpm: replay.wpm,
+      attemptAccuracy: replay.accuracy,
+      attemptMs: elapsedMs,
       day: row.day,
       ladder: row.ladder,
       serverNow: now,

@@ -89,6 +89,7 @@ export async function dailySubmit(request, env, now = Date.now()) {
     user: resolved.user,
     attemptId: parsed.attemptId,
     steps: parsed.steps,
+    finishedAt: parsed.finishedAt,
     now,
   });
   return json(outcome.body, { status: outcome.status });
